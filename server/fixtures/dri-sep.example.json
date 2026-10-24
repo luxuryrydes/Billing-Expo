@@ -1,0 +1,27 @@
+{
+  "_readme": "Copy to dri-sep.json. Rates must be confirmed against the APPROVED DRI contract / rate schedule — not copied from the bill. Duty rows and 'billed' amounts are transcribed from DRI Sep.pdf. Amounts below are placeholders.",
+  "confirmedBy": "",
+  "rates": {
+    "Innova": {
+      "billingModel": "daily_package",
+      "params": { "includedKm": "80", "includedHours": "8", "hourRounding": { "mode": "ceil", "unit": "60" } },
+      "components": [
+        { "code": "BASE", "label": "Base duty", "quantityExpr": "1", "rate": "0", "taxCategory": "taxable" },
+        { "code": "EXKM", "label": "Extra km", "quantityExpr": "extra_km", "rate": "0", "taxCategory": "taxable" },
+        { "code": "EXHR", "label": "Extra hours", "quantityExpr": "extra_hours", "rate": "0", "taxCategory": "taxable" },
+        { "code": "TOLL", "label": "Toll & parking", "kind": "reimbursement", "quantityExpr": "toll + parking", "rate": "1", "taxCategory": "non_taxable" }
+      ]
+    }
+  },
+  "duties": [
+    {
+      "ref": "DRI Sep.pdf page 1 row 1",
+      "category": "Innova",
+      "dutyDate": "2025-09-01",
+      "startKm": "0", "endKm": "0",
+      "startAt": "2025-09-01 09:00", "endAt": "2025-09-01 17:00",
+      "toll": null, "parking": null,
+      "billed": { "BASE": "0.00" }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "lr-billing-platform",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AI-assisted automated billing and duty management for LR Taxi Services Pvt. Ltd.",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,green \"npm run dev --workspace server\" \"npm run dev --workspace web\"",
+    "dev:server": "npm run dev --workspace server",
+    "dev:web": "npm run dev --workspace web",
+    "build": "npm run build --workspace server && npm run build --workspace web",
+    "test": "npm run test --workspace server",
+    "migrate": "npm run migrate --workspace server",
+    "start": "npm run start --workspace server",
+    "seed:demo": "npm run seed:demo --workspace server",
+    "typecheck": "npm run typecheck --workspace server && npx tsc -p web/tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6"
+  }
+}

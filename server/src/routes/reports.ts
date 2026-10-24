@@ -1,0 +1,98 @@
+import type { FastifyInstance } from 'fastify';
+import ExcelJS from 'exceljs';
+import { z } from 'zod';
+import { perm } from '../lib/auth.js';
+import { isoDate, parse, uuid } from '../lib/http.js';
+import { INR_FMT } from '../services/excel.js';
+import { DUTY_SELECT, dutyRowToApi } from '../services/duties.js';
+
+export async function reportRoutes(app: FastifyInstance) {
+  const db = app.db;
+
+  /** Every number here comes from the database. */
+  app.get('/dashboard', { preHandler: perm('view') }, async () => {
+    const one = async (sql: string, p: unknown[] = []) => Number((await db.one<{ n: number }>(sql, p))?.n ?? 0);
+    const [clients, activeContracts, dutiesToday, dutiesEnteredToday, withErrors, awaitingVerification, billsPreparing, billsAwaitingApproval, billsGeneratedThisMonth, openExceptions] = await Promise.all([
+      one(`SELECT count(*)::int AS n FROM clients WHERE status = 'active'`),
+      one(`SELECT count(*)::int AS n FROM contracts WHERE status = 'active'`),
+      one(`SELECT count(*)::int AS n FROM duties WHERE duty_date = current_date AND status <> 'void'`),
+      one(`SELECT count(*)::int AS n FROM duties WHERE created_at::date = current_date`),
+      one(`SELECT count(*)::int AS n FROM duties WHERE error_count > 0 AND status <> 'void'`),
+      one(`SELECT count(*)::int AS n FROM duties WHERE status = 'entered'`),
+      one(`SELECT count(*)::int AS n FROM bills WHERE status IN ('draft','calculation_pending','validation_required')`),
+      one(`SELECT count(*)::int AS n FROM bills WHERE status = 'under_review'`),
+      one(`SELECT count(DISTINCT b.id)::int AS n FROM bills b JOIN generated_files g ON g.bill_id = b.id WHERE date_trunc('month', g.created_at) = date_trunc('month', now())`),
+      one(`SELECT count(*)::int AS n FROM billing_exceptions e JOIN bills b ON b.id = e.bill_id WHERE e.status = 'open' AND b.status NOT IN ('cancelled','superseded')`),
+    ]);
+    // Contracts with no duty entries for yesterday (a pending-entry indicator for daily-duty contracts)
+    const pendingEntry = await db.query(
+      `SELECT k.id, k.reference_no, c.name AS client_name FROM contracts k JOIN clients c ON c.id = k.client_id
+       WHERE k.status = 'active' AND NOT EXISTS (SELECT 1 FROM duties d WHERE d.contract_id = k.id AND d.duty_date = current_date - 1 AND d.status <> 'void') ORDER BY c.name`);
+    const monthly = await db.query(
+      `SELECT to_char(b.period_start, 'YYYY-MM') AS month, c.name AS client_name, c.id AS client_id, sum(b.grand_total)::text AS total, count(*)::int AS bills
+       FROM bills b JOIN clients c ON c.id = b.client_id WHERE b.status IN ('approved','generated','submitted') AND b.period_start >= (date_trunc('month', now()) - interval '11 months')
+       GROUP BY 1,2,3 ORDER BY 1 DESC, 2`);
+    const recentDocs = await db.query(
+      `SELECT d.id, d.title, d.doc_type, c.name AS client_name, v.uploaded_at, v.extraction_status FROM documents d JOIN document_versions v ON v.document_id = d.id
+       LEFT JOIN clients c ON c.id = d.client_id ORDER BY v.uploaded_at DESC LIMIT 8`);
+    const recentBills = await db.query(
+      `SELECT b.id, b.bill_no, b.status, b.grand_total, b.period_start, c.name AS client_name FROM bills b JOIN clients c ON c.id = b.client_id ORDER BY b.updated_at DESC LIMIT 8`);
+    return {
+      counts: { clients, activeContracts, dutiesToday, dutiesEnteredToday, withErrors, awaitingVerification, billsPreparing, billsAwaitingApproval, billsGeneratedThisMonth, openExceptions, pendingEntry: pendingEntry.length },
+      pendingEntry, monthly, recentDocs, recentBills,
+    };
+  });
+
+  app.get('/reports/billing-summary', { preHandler: perm('view') }, async (req) => {
+    const q = parse(z.object({ from: isoDate, to: isoDate, clientId: uuid.optional() }), req.query);
+    return db.query(
+      `SELECT c.name AS client_name, k.reference_no, b.bill_no, b.revision_no, b.period_start, b.period_end, b.status,
+              b.taxable_value, b.non_taxable_total, b.tax_total, b.round_off, b.grand_total,
+              (SELECT count(*)::int FROM bill_duties bd WHERE bd.bill_id = b.id) AS duties
+       FROM bills b JOIN clients c ON c.id = b.client_id JOIN contracts k ON k.id = b.contract_id
+       WHERE b.period_start >= $1 AND b.period_start <= $2 AND b.status IN ('approved','generated','submitted') AND ($3::uuid IS NULL OR b.client_id = $3)
+       ORDER BY c.name, b.period_start`, [q.from, q.to, q.clientId ?? null]);
+  });
+
+  app.get('/reports/tax-summary', { preHandler: perm('view') }, async (req) => {
+    const q = parse(z.object({ from: isoDate, to: isoDate }), req.query);
+    return db.query(
+      `SELECT c.name AS client_name, c.gstin, b.bill_no, b.bill_date, t.tax_type, t.rate, t.taxable_base, t.amount
+       FROM bill_tax_lines t JOIN bills b ON b.id = t.bill_id AND t.snapshot_id = b.current_snapshot_id JOIN clients c ON c.id = b.client_id
+       WHERE b.period_start BETWEEN $1 AND $2 AND b.status IN ('approved','generated','submitted') ORDER BY b.bill_date, c.name, t.tax_type`, [q.from, q.to]);
+  });
+
+  app.get('/reports/exceptions', { preHandler: perm('view') }, async (req) => {
+    const q = parse(z.object({ status: z.enum(['open', 'waived', 'resolved']).optional() }), req.query);
+    return db.query(
+      `SELECT e.*, b.bill_no, b.period_start, b.status AS bill_status, c.name AS client_name, d.vehicle_reg_no, d.duty_date, u.name AS resolved_by_name
+       FROM billing_exceptions e JOIN bills b ON b.id = e.bill_id JOIN clients c ON c.id = b.client_id LEFT JOIN duties d ON d.id = e.duty_id LEFT JOIN app_users u ON u.id = e.resolved_by
+       WHERE b.status NOT IN ('cancelled','superseded') AND ($1::text IS NULL OR e.status = $1) ORDER BY e.created_at DESC LIMIT 1000`, [q.status ?? null]);
+  });
+
+  /** Duty register export with leading-zero-safe vehicle numbers. */
+  app.get('/reports/duty-register.xlsx', { preHandler: perm('export') }, async (req, reply) => {
+    const q = parse(z.object({ from: isoDate, to: isoDate, clientId: uuid.optional(), contractId: uuid.optional() }), req.query);
+    const rows = (await db.query(
+      `${DUTY_SELECT} WHERE d.duty_date BETWEEN $1 AND $2 AND d.status <> 'void' AND ($3::uuid IS NULL OR d.client_id = $3) AND ($4::uuid IS NULL OR d.contract_id = $4) ORDER BY d.duty_date, d.start_at, d.vehicle_reg_no`,
+      [q.from, q.to, q.clientId ?? null, q.contractId ?? null])).map(dutyRowToApi);
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Duty register');
+    ws.addRow(['Date', 'Department', 'Contract', 'Vendor', 'Vehicle type', 'Vehicle no.', 'Driver', 'User / officer', 'Duty type', 'Start km', 'Closing km', 'Km', 'Start time', 'Closing time', 'Toll', 'Parking', 'Status', 'Bill no.', 'Issues', 'Remarks']).font = { bold: true };
+    for (const r of rows) {
+      const km = r.startKm != null && r.endKm != null ? Number(r.endKm) - Number(r.startKm) : null;
+      const row = ws.addRow([r.dutyDate, r.clientName, r.contractRef, r.vendorName, r.vehicleCategoryName, r.vehicleRegNo, r.driverName, r.fieldOfficer, r.dutyTypeCode,
+        r.startKm != null ? Number(r.startKm) : null, r.endKm != null ? Number(r.endKm) : null, km, r.startAt, r.endAt,
+        r.toll != null ? Number(r.toll) : null, r.parking != null ? Number(r.parking) : null, r.status, r.billNo,
+        ((r.issues as { message: string }[]) ?? []).map((i) => i.message).join('; '), r.remarks]);
+      row.getCell(6).numFmt = '@';
+      row.getCell(15).numFmt = INR_FMT;
+      row.getCell(16).numFmt = INR_FMT;
+    }
+    ws.columns.forEach((c, i) => (c.width = [11, 24, 16, 14, 12, 14, 18, 18, 9, 9, 9, 7, 17, 17, 9, 9, 9, 18, 40, 20][i]));
+    ws.views = [{ state: 'frozen', ySplit: 1 }];
+    reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    reply.header('Content-Disposition', `attachment; filename="duty-register_${q.from}_${q.to}.xlsx"`);
+    return reply.send(Buffer.from(await wb.xlsx.writeBuffer()));
+  });
+}

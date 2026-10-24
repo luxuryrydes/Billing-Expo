@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.local
+data/
+worker/.venv/
+__pycache__/
+*.log
+coverage/
+server/fixtures/dri-sep.report.json
+.claude/

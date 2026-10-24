@@ -1,0 +1,154 @@
+# LR Taxi Services — Billing & Duty Management
+
+A configurable billing platform for LR Taxi Services Pvt. Ltd.: from contract documents and approved rate rules, through daily duty entry, to department-specific Excel/PDF bills with a full calculation trace and audit history.
+
+**Core principle:** bill amounts come only from a deterministic, tested calculation engine applied to rules that a person has approved. Document extraction (rule-based, optionally AI) only proposes candidate terms with their source text; it never creates or approves billing rules.
+
+---
+
+## 1. Modules
+
+| Module | What it does |
+|---|---|
+| Dashboard | Live counts from the database: departments, contracts, duties today, duties with errors / awaiting verification, bills preparing / awaiting approval / generated, open exceptions, contracts with no duty yesterday, department × month totals, recent bills and documents. |
+| Departments / Clients | Department profiles: address, GSTIN/PAN, state, contacts, special instructions. |
+| Contracts | Multiple contracts per department: validity, PO/work order, billing frequency, tax mode (inclusive/exclusive), document- or line-level tax, invoice rounding, 1- or 2-level approval, bill-number format, contract-specific validation thresholds and extra duty fields. |
+| Tax rules | Per contract, effective-dated CGST/SGST/IGST/UTGST/CESS/other. No rate is assumed; a rule needs a recorded source (clause/notification) and an approver before it applies. A 0% rule records a confirmed exemption. |
+| Document Uploads | Versioned originals (SHA-256) for contracts, tenders, SCC/ACC, rate schedules, sample bills, duty sheets. A Python worker extracts page text and tables (PDF, XLSX, DOCX, CSV; OCR when Tesseract is installed). Candidate terms are shown with page, quoted source text, method and confidence; reviewers accept, edit or reject each one; conflicting values across documents are flagged. |
+| Rate Schemes | Versioned, effective-dated rules per contract, vehicle category and duty type. Package parameters (included km/hours, grace rule, hour/km rounding, km adjustment, night window, monthly limits) plus ordered charge components whose quantity and condition are safe formulas (e.g. `extra_km`, `max(0, total_km - monthly_included_km)`, `duty_type == 'OUTSTATION'`). Components are per duty, per vehicle-period, or per bill; charge, reimbursement or deduction; taxable or non-taxable; with optional min/max and clause reference. Draft → submit → approve; approved versions are immutable (database trigger); a new version auto-closes the previous one; overlapping approved versions are refused. Built-in test calculator shows every step. |
+| Billing Templates | Layout designer (paper, orientation, header fields, grouped column headings, per-duty or per-line rows, sort/subtotals, totals, summary, amount in words, notes, declaration, signatures) or a department's own .xlsx mapped cell-by-cell. Preview with sample data or a real bill; approval requires confirming the rendered preview was reviewed. Versions lock on approval; bills keep the version they were approved with. |
+| Daily Duty Entry | Excel-like grid per contract and date: paste blocks from Excel, Enter to move down, Ctrl+D to copy the previous row, contract-specific fields. Import wizard for .xlsx/.csv with automatic header detection and column mapping, dry-run check, leading-zero-safe vehicle numbers, and explicit handling of closing times past midnight. |
+| Duty Register | Filter by department, contract, dates, vehicle, driver, status, billing state, validation; verify in bulk; per-duty history with old → new values and correction reasons; void with reason; Excel export. |
+| Validation | Missing mandatory fields, invalid numbers/times, negative or reversed odometer, zero/high km, zero/long duration, cross-midnight handled from full date-times, duplicates and overlaps for the same vehicle, outside contract dates, unknown vehicle, unknown duty type, missing expense evidence. Warnings vs. errors are configurable per contract. Readings are never silently repaired. |
+| Billing Workspace | Step-by-step month-end: select contract and period → check eligible duties (already-billed, errors, unverified, vehicle coverage gaps) → calculate → resolve exceptions (errors must be fixed or the duty excluded with a reason; warnings need a recorded decision) → submit for review → (review) → approve (bill number assigned, everything frozen) → generate Excel + PDF + internal calculation register with automatic reconciliation → mark submitted. Statuses: Draft, Calculation pending, Validation required, Under review, Approved, Generated, Submitted (+ Superseded, Cancelled). |
+| Revisions | An approved bill is never edited. "Revise" creates revision N+1 with the same bill number; duties on the original can be corrected (with reason) while the revision is open; approving the revision supersedes the original and moves the duty links. |
+| Reports & Reconciliation | Department-wise billing summary, tax summary by bill and tax type, open-exception report, duty register export. Each bill has its calculation register and reconciliation result. |
+| Users, Audit Logs, Settings | Roles: Administrator, Billing operator, Billing reviewer, Approver, Read-only. Optional maker-checker (preparer cannot approve). Full audit log. Supplier (LR) invoice profiles, vehicle categories, duty types, vehicles, drivers, default validation thresholds. |
+
+## 2. Architecture
+
+```
+web/      React 19 + TypeScript + Vite + TanStack Query  (UI)
+server/   Node.js + TypeScript + Fastify + Zod           (API, auth, workflow)
+  src/engine/     calculation engine — the single source of billed amounts
+                  decimal.js arithmetic, safe formula language, rate selection,
+                  duty/period/bill components, taxes, invoice rounding, checks
+  src/services/   duty validation & import, document extraction, render model,
+                  Excel (ExcelJS) and PDF (pdfmake) writers, billing workflow
+  migrations/     PostgreSQL schema (plain SQL)
+worker/   Python document worker (PyMuPDF, pdfplumber, openpyxl, python-docx)
+```
+
+* **Database:** PostgreSQL / Supabase via `DATABASE_URL`, or embedded **PGlite** (the PostgreSQL engine compiled to WebAssembly) for local use and tests — same SQL and migrations.
+* **One authoritative calculation:** only `server/src/engine` computes amounts. Python is used for reading documents only. Duty-level, vehicle-period and bill-level components, then taxes, then invoice rounding; every line stores its inputs, formula, rule version and clause.
+* **Snapshots:** each calculation stores an immutable snapshot (inputs incl. rate versions, tax rules, client/supplier details and duties; outputs; SHA-256). Generated files are re-rendered from the snapshot, so a historical bill stays explainable after rates, templates or client details change.
+* **Excel ↔ PDF agreement:** both are rendered from one render model; after generation the system reads the Excel back and extracts the PDF text, and checks grand total, bill number, every vehicle number and every summary line.
+* **AI (optional):** if `ANTHROPIC_API_KEY` is set, Claude (`claude-opus-5-5`, structured output) proposes extra candidate terms. Each must quote the document; quotes that cannot be found in the page text are discarded. Document text is treated as data and the model is told to ignore instructions inside it.
+* **Security:** scrypt password hashing, httpOnly SameSite session cookie, role permissions on every endpoint, login throttling, upload type/size/signature checks (no macro formats), files stored by hash outside the web root, no secrets in frontend code, database triggers that block edits to approved bills, bill lines and approved rate versions, RLS enabled on all tables so Supabase anon/authenticated keys cannot read them directly (the server connects as owner).
+
+### Data model (main tables)
+`app_users, sessions, app_settings, files, supplier_profiles, clients, contracts, vehicle_categories, duty_types, vehicles, drivers, documents, document_versions, extracted_items, rate_schemes, rate_scheme_versions, tax_rules, duty_import_batches, duties, billing_templates, billing_template_versions, bills, bill_duties (one active bill per duty — partial unique index), calculation_snapshots, bill_lines, bill_tax_lines, billing_exceptions, approvals, generated_files, audit_events`. See `server/migrations/001_init.sql`.
+
+## 3. Setup
+
+Requirements: Node.js 20+ (tested on 24), Python 3.10+ (tested on 3.14). Optional: Tesseract OCR for scanned documents; PostgreSQL 15+ or a Supabase project.
+
+```bash
+npm install
+```
+
+```bash
+python -m venv worker/.venv
+```
+
+```bash
+worker/.venv/Scripts/python -m pip install -r worker/requirements.txt
+```
+(On Linux/macOS use `worker/.venv/bin/python`.)
+
+```bash
+cp .env.example .env
+```
+
+Migrations run automatically when the server starts; to run them separately:
+
+```bash
+npm run migrate
+```
+
+## 4. Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `data/pglite` | `postgres://…` for PostgreSQL/Supabase (server-side connection string), or a folder for embedded PGlite |
+| `DATABASE_SSL` | `false` | `true` for hosted Postgres that requires TLS |
+| `STORAGE_DIR` | `data/files` | uploaded originals and generated bills |
+| `MAX_UPLOAD_MB` | `25` | upload limit |
+| `PORT`, `HOST` | `4000`, `127.0.0.1` | API / production server |
+| `SESSION_HOURS` | `12` | session lifetime |
+| `COOKIE_SECURE` | `false` | set `true` behind HTTPS |
+| `PYTHON_BIN` | `worker/.venv/...` | Python for the document worker |
+| `ANTHROPIC_API_KEY` | empty | optional AI extraction |
+| `ANTHROPIC_MODEL` | `claude-opus-5-5` | model for AI extraction |
+
+## 5. Running
+
+Development (API on :4000, UI on http://localhost:5173 with API proxy):
+
+```bash
+npm run dev
+```
+
+Production (the API also serves the built UI):
+
+```bash
+npm run build
+```
+
+```bash
+npm start
+```
+
+The document worker is not a separate service: the API starts it per document (`python -I worker/extract.py <file>`). On first open with an empty database the UI asks you to create the administrator.
+
+Optional demo dataset (a DEMO department, DEMO rates/taxes, 78 September duties, a draft bill). Use a separate database folder; generated demo logins are written to `.env.local`:
+
+```bash
+DATABASE_URL=data/demo-db STORAGE_DIR=data/demo-files npm run seed:demo
+```
+
+## 6. Operating guide
+
+1. **System Settings → Supplier profiles:** enter LR Taxi Services' legal name, address, GSTIN, PAN, bank details. Add vehicle categories (e.g. Innova, Dzire) and duty types.
+2. **Departments / Clients → Add department**, then **Add contract** (validity, tax mode, rounding, approval levels, bill-number format).
+3. **Document Uploads → Upload** the contract, tender, SCC/ACC, rate schedule and a sample bill against the contract. Open each document, click a candidate to see its source text, and accept / correct / reject it. Resolve flagged conflicts.
+4. **Contract → Tax rules:** add each applicable tax with its source; an approver approves it.
+5. **Rate Schemes → New scheme:** set applicability (dates, categories, duty types) and parameters, add components from the presets and enter the approved rates, check examples in the **test calculator**, **Submit for approval**; an approver approves.
+6. **Billing Templates → New template:** design the layout (or upload the department's .xlsx and map cells), preview with sample data and with a real bill, then approve after reviewing the preview.
+7. **Daily Duty Entry:** choose contract and date, type or paste rows, Save. Or **Import Excel / CSV**. Fix errors shown in red; a reviewer verifies duties in the **Duty Register**.
+8. **Billing Workspace → New bill:** pick contract and month, **Calculate**, review the Duties / Calculation / Exceptions tabs (click any line for its full trace), exclude or fix problem duties, accept warnings with a reason, **Submit for review**, **Approve**, **Generate Excel & PDF**, check the reconciliation, download, **Mark submitted** with the diary reference.
+9. Corrections after approval: **Revise** on the bill.
+
+## 7. Verification performed
+
+* `npm test` — **41 passed, 1 skipped** (the DRI comparison, which needs the fixture below):
+  * engine (30): base-only, km excess, hour excess (exact and rounded), both, grace rules, overnight/cross-midnight, night windows, toll/parking non-taxable, half-up decimal rounding (93.345 → 93.35), missing/reversed odometer errors, rate version by effective date, vehicle-category rates, ambiguous/unapproved schemes, mixed taxable/non-taxable with rupee rounding, line-level and inclusive tax, missing tax rule, monthly hire + monthly km limit + minimum guarantee, 3,000-duty month; validation of duplicates, overlaps, contract dates, configurable hard errors; formula language safety.
+  * end-to-end API on a real PostgreSQL engine (PGlite): setup and roles, tax-rule source requirement, rate submit/approve/immutability/auto-close, template preview + approval, duty entry with leading-zero vehicle numbers and overnight duty, Excel import (header detection, `0099` kept as text, next-day closing flagged), full month-end bill (expected ₹21,316.00 hand-calculated and matched), approval, Excel/PDF generation with all reconciliation checks passing, double-billing refused, revision flow superseding the original, database trigger blocking edits to a superseded bill, document upload → extraction of base rate / package km & hours / extra-km rate / tax rates as *pending* candidates, role checks on review.
+* `npm run build` — server (tsc) and web (tsc + Vite) build cleanly. Compiled server checked: serves UI and API, unauthenticated API calls return 401.
+* A generated bill PDF was rasterised and inspected (grouped headers, totals, summary, amount in words, leading-zero vehicle numbers); the TOTAL label was then widened across empty cells in both PDF and Excel.
+* The UI was exercised in a browser against the demo data: sign-in, dashboard figures, contracts, rate schemes, duty register, and calculating a 78-duty bill from the Billing Workspace (₹3,35,963.00; all engine checks passing).
+
+### DRI September reference comparison
+The two reference PDFs (`Day to Day Duty September.pdf`, `DRI Sep.pdf`) were **not available** in this workspace, so the DRI comparison has **not been run** and no DRI rates were entered anywhere. To run it: copy `server/fixtures/dri-sep.example.json` to `dri-sep.json`, enter the rates **confirmed against the approved DRI contract** and the duty rows / amounts from the reference bill, and run `npm test`. The report `server/fixtures/dri-sep.report.json` lists every per-duty, per-component difference; `DRI_STRICT=1` makes differences fail the test. Differences should be investigated, not "fixed" by changing formulas.
+
+## 8. Known limitations / still to do
+
+* **Reference documents:** DRI and day-to-day duty PDFs not yet processed (see above). The default bill layout is a generic duty-bill layout, not yet matched to the DRI format — build and approve the DRI template after comparing the preview with `DRI Sep.pdf`.
+* **OCR:** scanned pages need Tesseract installed on the server; without it the page is flagged "no text layer" and values must be entered manually.
+* **AI extraction** is implemented and type-checked but was not run against the live API (no key configured here); rule-based extraction is tested.
+* **Department .xlsx templates:** cell mapping is edited as JSON (with a workbook cell viewer); there is no click-to-map designer yet. Inserted rows copy the template row's style; merged cells or formulas below the table that reference the table range are not re-pointed automatically (use `{START}`/`{END}` tokens in mapped formulas). Not yet tried on a real department workbook.
+* **PDF templates** are reproduced with the designer; an uploaded PDF is a visual reference, not filled in place.
+* **PostgreSQL/Supabase:** schema and code are standard PostgreSQL but were tested on PGlite (embedded PostgreSQL), not on a hosted server.
+* Extraction runs in-process in the background (no separate job queue); fine for a single server.
+* Per-duty attachment upload is not in the UI yet (use the supporting-document reference field; duty sheets can be uploaded as documents). Public-holiday calendars are not modelled (conditions can use `weekday` / `is_sunday`).
+* No automated browser tests; UI flows were checked manually.
