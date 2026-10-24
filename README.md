@@ -54,6 +54,10 @@ worker/   Python document worker (PyMuPDF, pdfplumber, openpyxl, python-docx)
 
 ## 3. Setup
 
+**Quick start:** install Node.js 20+ (and Python 3.10+ for reading PDF/Excel documents), then double-click `start-windows.bat` (on Linux/macOS run `sh start.sh`). The first run installs packages, builds the app and opens http://localhost:4000, where you create the administrator. Later runs start the app straight away. Your data is kept in the `data` folder.
+
+Manual setup:
+
 Requirements: Node.js 20+ (tested on 24), Python 3.10+ (tested on 3.14). Optional: Tesseract OCR for scanned documents; PostgreSQL 15+ or a Supabase project.
 
 ```bash
