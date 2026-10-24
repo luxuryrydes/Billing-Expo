@@ -4,8 +4,10 @@ import { Link, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { Confirm, ErrorBox, Field, Loading, Modal, PageHead, Status, Tabs, useAction } from '../components/ui';
-import { d, dt } from '../format';
+import { d } from '../format';
 import { useClients, useContracts, useSuppliers } from '../lookups';
+import { ImportDialog } from '../components/ImportDialog';
+import { DocumentList, DocumentUploader } from '../components/DocumentUploader';
 
 const DEFAULT = {
   client_id: '', supplier_profile_id: null, title: '', reference_no: '', po_number: '', start_date: '', end_date: '', billing_frequency: 'monthly', status: 'draft',
@@ -42,11 +44,14 @@ export function ContractForm({ initial, onDone }: { initial?: any; onDone: () =>
         <Field label="Contract title" required><input value={f.title} onChange={set('title')} /></Field>
         <Field label="Contract reference no." required><input value={f.reference_no} onChange={set('reference_no')} /></Field>
         <Field label="Work order / PO no."><input value={f.po_number ?? ''} onChange={set('po_number')} /></Field>
+        <Field label="Bid / tender no."><input value={f.bid_no ?? ''} onChange={set('bid_no')} /></Field>
+        <Field label="SAC code"><input value={f.sac_code ?? ''} onChange={set('sac_code')} /></Field>
+        <Field label="Contract value (₹)"><input value={f.contract_value ?? ''} onChange={set('contract_value')} inputMode="decimal" /></Field>
       </div>
       <div className="grid g4">
         <Field label="Start date" required><input type="date" value={f.start_date} onChange={set('start_date')} /></Field>
         <Field label="End date"><input type="date" value={f.end_date ?? ''} onChange={set('end_date')} /></Field>
-        <Field label="Billing frequency"><select value={f.billing_frequency} onChange={set('billing_frequency')}><option value="monthly">Monthly</option><option value="fortnightly">Fortnightly</option><option value="weekly">Weekly</option><option value="per_trip">Per trip</option></select></Field>
+        <Field label="Billing frequency"><select value={f.billing_frequency} onChange={set('billing_frequency')}><option value="monthly">Monthly</option><option value="fortnightly">Fortnightly</option><option value="weekly">Weekly</option><option value="daily">Date-wise (daily)</option><option value="per_trip">Per trip</option></select></Field>
         <Field label="Status"><select value={f.status} onChange={set('status')}><option value="draft">Draft</option><option value="active">Active</option><option value="expired">Expired</option><option value="terminated">Terminated</option></select></Field>
       </div>
       <h3>Tax & invoice settings</h3>
@@ -147,13 +152,9 @@ export function ContractDetailPage() {
           <div className="panel"><h3>Special instructions</h3><div className="pre">{k.special_instructions || '—'}</div></div>
         </div>
       )}
-      {tab === 'tax' && <TaxRules contractId={k.id} rules={k.taxRules} reload={q.refetch} />}
-      {tab === 'rates' && <SchemesList contractId={k.id} schemes={k.schemes} reload={q.refetch} />}
-      {tab === 'docs' && (
-        <div className="panel tight"><table className="t"><thead><tr><th>Document</th><th>Type</th><th>Latest version</th><th>Added</th></tr></thead>
-          <tbody>{k.documents.map((x: any) => <tr key={x.id}><td><Link to={`/documents/${x.id}`}>{x.title}</Link></td><td>{x.doc_type}</td><td>v{x.latest_version}</td><td>{dt(x.created_at)}</td></tr>)}
-            {k.documents.length === 0 && <tr><td colSpan={4} className="empty">No documents. <Link to={`/documents?contract=${k.id}`}>Upload contract documents</Link>.</td></tr>}</tbody></table></div>
-      )}
+      {tab === 'tax' && <TaxRules contractId={k.id} clientId={k.client_id} startDate={k.start_date} rules={k.taxRules} reload={q.refetch} />}
+      {tab === 'rates' && <SchemesList contractId={k.id} contractLabel={`${k.client_name} — ${k.reference_no}`} schemes={k.schemes} reload={q.refetch} />}
+      {tab === 'docs' && <ContractDocuments clientId={k.client_id} contractId={k.id} />}
       {tab === 'terms' && <ExtractedTerms contractId={k.id} />}
       {tab === 'templates' && (
         <div className="panel tight"><table className="t"><thead><tr><th>Template</th><th>Scope</th></tr></thead>
@@ -165,7 +166,7 @@ export function ContractDetailPage() {
   );
 }
 
-function TaxRules({ contractId, rules, reload }: { contractId: string; rules: any[]; reload: () => void }) {
+function TaxRules({ contractId, clientId, startDate, rules, reload }: { contractId: string; clientId: string; startDate: string; rules: any[]; reload: () => void }) {
   const { can } = useAuth();
   const { run, busy } = useAction();
   const [form, setForm] = useState<any>(null);
@@ -194,7 +195,17 @@ function TaxRules({ contractId, rules, reload }: { contractId: string; rules: an
           </tbody>
         </table>
       </div>
-      {can('tax.write') && <button className="btn primary" onClick={() => setForm({ name: '', tax_type: 'CGST', rate: '', effective_from: '', effective_to: '', source_ref: '' })}>Add tax rule</button>}
+      <div className="row">
+        {can('tax.write') && <button className="btn primary" onClick={() => setForm({ name: '', tax_type: 'CGST', rate: '', effective_from: '', effective_to: '', source_ref: '' })}>Add tax rule</button>}
+        {can('tax.write') && <button className="btn" disabled={busy} onClick={async () => {
+          const c = await api.get(`/clients/${clientId}`);
+          const parts = ([['CGST', c.cgst_rate], ['SGST', c.sgst_rate], ['IGST', c.igst_rate]] as [string, string | null][]).filter(([, r]) => r != null && Number(r) > 0);
+          if (!parts.length) { alert('The department has no GST rates recorded (or its GST text is ambiguous). Set them on the department, or add the rules here.'); return; }
+          if (!confirm(`Create draft tax rules ${parts.map(([t, r]) => `${t} ${Number(r)}%`).join(' + ')} from ${c.name}'s master data? They still need approval.`)) return;
+          for (const [t, r] of parts) await run(() => api.post(`/contracts/${contractId}/tax-rules`, { name: `${t} ${Number(r)}%`, tax_type: t, rate: String(Number(r)), effective_from: startDate, source_ref: `Department master data: ${c.gst_label || c.gst_mode || 'GST settings'} — confirm against the contract` }));
+          reload();
+        }}>Use department's GST settings</button>}
+      </div>
       {form && (
         <Modal title="Tax rule" onClose={() => setForm(null)}>
           <div className="grid g2">
@@ -214,12 +225,17 @@ function TaxRules({ contractId, rules, reload }: { contractId: string; rules: an
   );
 }
 
-function SchemesList({ contractId, schemes, reload }: { contractId: string; schemes: any[]; reload: () => void }) {
+function SchemesList({ contractId, contractLabel, schemes, reload }: { contractId: string; contractLabel: string; schemes: any[]; reload: () => void }) {
   const { can } = useAuth();
   const { run } = useAction();
   const [name, setName] = useState('');
+  const [importing, setImporting] = useState(false);
   return (
     <>
+      {can('rate.write') && <div className="actions-bar"><button className="btn primary" onClick={() => setImporting(true)}>Import rate card</button>
+        <a className="btn" href="/api/imports/rate_card/template.xlsx">Download rate-card template</a>
+        <span className="small muted">Excel, CSV or the PDF rate schedule. Changed rates become new draft versions; approved rates and earlier bills are not altered.</span></div>}
+      {importing && <ImportDialog entity="rate_card" contractId={contractId} contextLabel={contractLabel} onClose={() => setImporting(false)} onDone={reload} />}
       <div className="panel tight">
         <table className="t">
           <thead><tr><th>Scheme</th><th>Versions</th></tr></thead>
@@ -269,5 +285,17 @@ function ExtractedTerms({ contractId }: { contractId: string }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function ContractDocuments({ clientId, contractId }: { clientId: string; contractId: string }) {
+  const { can } = useAuth();
+  const q = useQuery({ queryKey: ['contract-docs', contractId], queryFn: () => api.get<any[]>(`/documents?contractId=${contractId}`), refetchInterval: (qq) => ((qq.state.data ?? []).some((x: any) => ['pending', 'running'].includes(x.extraction_status)) ? 2500 : false) });
+  return (
+    <>
+      {can('document.upload') && <div className="actions-bar"><DocumentUploader clientId={clientId} contractId={contractId} onDone={() => q.refetch()} />
+        <span className="small muted">Contract, tender, SCC/ACC, rate schedule, work order. Uploading a document that already exists offers to update it as a new version.</span></div>}
+      <div className="panel tight"><DocumentList docs={q.data ?? []} reload={() => q.refetch()} /></div>
+    </>
   );
 }

@@ -10,28 +10,30 @@ import { LoginPage } from './pages/Login';
 import { DashboardPage } from './pages/Dashboard';
 import { ClientsPage, ClientDetailPage } from './pages/Clients';
 import { ContractsPage, ContractDetailPage } from './pages/Contracts';
-import { DocumentsPage, DocumentReviewPage } from './pages/Documents';
+import { DocumentReviewPage } from './pages/Documents';
 import { RateSchemesPage, RateVersionPage } from './pages/Rates';
 import { DutyEntryPage } from './pages/DutyEntry';
 import { DutyRegisterPage } from './pages/DutyRegister';
 import { TemplatesPage, TemplateVersionPage } from './pages/Templates';
-import { BillingWorkspacePage, BillsPage } from './pages/Bills';
+import { BillingWorkspacePage } from './pages/Bills';
+import { BillsPage } from './pages/BillingExport';
 import { ReportsPage } from './pages/Reports';
 import { UsersPage, AuditPage, SettingsPage } from './pages/Admin';
+import { OnboardingPage } from './pages/Onboarding';
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } } });
 
 const NAV: { to: string; label: string; perm?: string; group?: string }[] = [
   { to: '/', label: 'Dashboard' },
-  { to: '/clients', label: 'Departments / Clients', group: 'Setup' },
+  { to: '/onboarding', label: 'Set up from documents', group: 'Setup', perm: 'client.write' },
+  { to: '/clients', label: 'Departments & Institutions' },
   { to: '/contracts', label: 'Contracts' },
-  { to: '/documents', label: 'Document Uploads' },
   { to: '/rates', label: 'Rate Schemes' },
-  { to: '/templates', label: 'Billing Templates' },
   { to: '/duties/entry', label: 'Daily Duty Entry', group: 'Daily work' },
   { to: '/duties', label: 'Duty Register' },
   { to: '/billing', label: 'Billing Workspace', group: 'Billing' },
-  { to: '/bills', label: 'Monthly Bills' },
+  { to: '/bills', label: 'Billing Export / Invoices' },
+  { to: '/templates', label: 'Billing Templates' },
   { to: '/reports', label: 'Reports & Reconciliation' },
   { to: '/users', label: 'User Management', perm: 'user.admin', group: 'Administration' },
   { to: '/audit', label: 'Audit Logs', perm: 'audit.view' },
@@ -68,11 +70,12 @@ function Shell() {
       <main className="main">
         <Routes>
           <Route path="/" element={<DashboardPage />} />
+          <Route path="/onboarding" element={<OnboardingPage />} />
           <Route path="/clients" element={<ClientsPage />} />
           <Route path="/clients/:id" element={<ClientDetailPage />} />
           <Route path="/contracts" element={<ContractsPage />} />
           <Route path="/contracts/:id" element={<ContractDetailPage />} />
-          <Route path="/documents" element={<DocumentsPage />} />
+          <Route path="/documents" element={<Navigate to="/clients" />} />
           <Route path="/documents/:id" element={<DocumentReviewPage />} />
           <Route path="/rates" element={<RateSchemesPage />} />
           <Route path="/rates/versions/:id" element={<RateVersionPage />} />

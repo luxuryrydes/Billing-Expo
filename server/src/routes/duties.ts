@@ -4,13 +4,13 @@ import { z } from 'zod';
 import { audit, diff } from '../lib/audit.js';
 import { can, perm } from '../lib/auth.js';
 import { badRequest, forbidden, isoDate, notFound, parse, uuid } from '../lib/http.js';
-import { checkUpload, loadFile, saveFile } from '../lib/storage.js';
+import { checkUpload, filePath, loadFile, saveFile } from '../lib/storage.js';
 import { addDays } from '../engine/time.js';
 import {
   assertDutyEditable, computeIssues, contractCtx, DUTY_SELECT, DutyInputSchema, dutyRowToApi, insertDuty, updateDuty, validationSettings,
   type ContractCtx, type DutyInputT,
 } from '../services/duties.js';
-import { autoMap, IMPORT_FIELDS, parseDate, parseNumber, parseTime, readSheet, type ImportField } from '../services/import.js';
+import { autoMap, IMPORT_FIELDS, isBlankMark, parseDate, parseNumber, parseTime, readAnySheet, type ImportField } from '../services/import.js';
 import type { ValidationSettings } from '../engine/validate.js';
 
 const ListQuery = z.object({
@@ -146,20 +146,38 @@ export async function dutyRoutes(app: FastifyInstance) {
   // Import -------------------------------------------------------------------
   app.post('/duties/import/preview', { preHandler: perm('duty.write') }, async (req) => {
     const file = await req.file();
-    if (!file) throw badRequest('Attach an .xlsx or .csv duty sheet');
+    if (!file) throw badRequest('Attach an .xlsx, .csv or .pdf duty sheet');
     const buf = await file.toBuffer();
-    const ext = checkUpload(file.filename, buf, ['.xlsx', '.csv']);
-    const sheet = await readSheet(buf, ext).catch((e) => { throw badRequest(`Could not read the sheet: ${(e as Error).message}`); });
+    const ext = checkUpload(file.filename, buf, ['.xlsx', '.csv', '.pdf']);
     const stored = await saveFile(db, file.filename, buf, req.user!.id);
+    const sheet = await readAnySheet(buf, ext, filePath(stored)).catch((e) => { throw badRequest(`Could not read the sheet: ${(e as Error).message}`); });
+    const mapping = autoMap(sheet.headers);
+    // Shared duty sheets carry several departments: count them and suggest the matching contract.
+    const departments: { value: string; rows: number; contractId: string | null; contractLabel: string | null }[] = [];
+    if (mapping.department !== undefined) {
+      const counts = new Map<string, number>();
+      for (const r of sheet.rows) {
+        const v = r.cells[mapping.department]?.text.trim().toUpperCase() ?? '';
+        counts.set(v, (counts.get(v) ?? 0) + 1);
+      }
+      const clients = await db.query<{ id: string; short_code: string; aliases: string[]; name: string }>('SELECT id, short_code, aliases, name FROM clients');
+      const contracts = await db.query<{ id: string; client_id: string; reference_no: string; status: string; start_date: string; end_date: string | null }>(`SELECT id, client_id, reference_no, status, start_date, end_date FROM contracts WHERE status IN ('active','draft') ORDER BY start_date DESC`);
+      for (const [value, rows] of [...counts].sort((a, b) => b[1] - a[1])) {
+        const c = clients.find((x) => x.short_code.toUpperCase() === value || (x.aliases ?? []).some((a) => a.toUpperCase() === value) || x.name.toUpperCase() === value);
+        const k = c ? contracts.find((x) => x.client_id === c.id) : undefined;
+        departments.push({ value, rows, contractId: k?.id ?? null, contractLabel: k ? `${c!.name} — ${k.reference_no}` : null });
+      }
+    }
     return {
       fileId: stored.id,
       fileName: path.basename(file.filename),
       sheetName: sheet.sheetName,
       headerRow: sheet.headerRow,
       headers: sheet.headers,
-      mapping: autoMap(sheet.headers),
+      mapping,
       fields: Object.keys(IMPORT_FIELDS),
       rowCount: sheet.rows.length,
+      departments,
       sample: sheet.rows.slice(0, 20).map((r) => ({ rowNumber: r.rowNumber, cells: r.cells.map((c) => c.text) })),
     };
   });
@@ -168,7 +186,10 @@ export async function dutyRoutes(app: FastifyInstance) {
     const b = parse(
       z.object({
         fileId: uuid,
-        contractId: uuid,
+        /** Single-department sheet: every row goes to this contract. */
+        contractId: uuid.optional().nullable(),
+        /** Shared sheet: Department column value → contract id ('' = skip those rows). */
+        departmentRouting: z.record(z.string(), z.string()).optional(),
         mapping: z.record(z.string(), z.number().int().min(0)),
         overnightRule: z.enum(['next_day', 'flag']).default('next_day'),
         defaultDutyType: z.string().nullable().optional(),
@@ -179,21 +200,44 @@ export async function dutyRoutes(app: FastifyInstance) {
     const f = await db.one<{ storage_path: string; original_name: string }>('SELECT * FROM files WHERE id = $1', [b.fileId]);
     if (!f) throw notFound('Uploaded file');
     const loaded = (await loadFile(db, b.fileId))!;
-    const sheet = await readSheet(loaded.buf, path.extname(f.original_name).toLowerCase());
-    const k = await contractCtx(db, b.contractId);
-    const s = await validationSettings(db, k);
-    const cats = await db.query<{ id: string; name: string }>('SELECT id, name FROM vehicle_categories');
-    const catByName = new Map(cats.map((c) => [c.name.toLowerCase().replace(/\s+/g, ''), c.id]));
+    const sheet = await readAnySheet(loaded.buf, path.extname(f.original_name).toLowerCase(), filePath(f));
     const m = b.mapping as Partial<Record<ImportField, number>>;
+    const routing = b.departmentRouting && m.department !== undefined ? Object.fromEntries(Object.entries(b.departmentRouting).map(([k, v]) => [k.trim().toUpperCase(), v])) : null;
+    if (!routing && !b.contractId) throw badRequest('Choose the contract, or map the Department column and route each department to a contract');
+    const ctxCache = new Map<string, { k: ContractCtx; s: ValidationSettings }>();
+    // Uses the caller's executor: inside a transaction every query must go through it.
+    const ctxFor = async (ex: typeof db, id: string) => {
+      let c = ctxCache.get(id);
+      if (!c) { const k = await contractCtx(ex, id); c = { k, s: await validationSettings(ex, k) }; ctxCache.set(id, c); }
+      return c;
+    };
+    const cats = await db.query<{ id: string; name: string; aliases: string[] }>('SELECT id, name, aliases FROM vehicle_categories');
+    const norm = (x: string) => x.toLowerCase().replace(/[\s.-]+/g, '');
+    const catByName = new Map<string, string>();
+    // Spelling as configured ("Innova"), whatever case the sheet uses ("INNOVA").
+    const spelling = new Map<string, string>();
+    for (const c of cats) { catByName.set(norm(c.name), c.id); for (const a of c.aliases ?? []) { catByName.set(norm(a), c.id); spelling.set(norm(a), a); } }
     const cell = (cells: (typeof sheet.rows)[number]['cells'], fld: ImportField) => (m[fld] === undefined ? undefined : cells[m[fld]!]);
 
-    const prepared = sheet.rows.map((r) => {
-      const extra: { code: string; severity: 'error' | 'warning'; message: string; field?: string }[] = [];
+    const skipped = new Map<string, number>();
+    const prepared: { rowNumber: number; input: Record<string, unknown>; extra: { code: string; severity: 'error' | 'warning'; message: string; field?: string }[] }[] = [];
+    for (const r of sheet.rows) {
+      let contractId = b.contractId ?? null;
+      if (routing) {
+        const dep = (cell(r.cells, 'department')?.text ?? '').trim().toUpperCase();
+        contractId = routing[dep] || null;
+        if (!contractId) { skipped.set(dep || '(blank)', (skipped.get(dep || '(blank)') ?? 0) + 1); continue; }
+      }
+      const extra: (typeof prepared)[number]['extra'] = [];
       const date = parseDate(cell(r.cells, 'dutyDate'));
       if (!date) extra.push({ code: 'INVALID_DATE', severity: 'error', field: 'dutyDate', message: `Duty date "${cell(r.cells, 'dutyDate')?.text ?? ''}" could not be read` });
       const endDate = parseDate(cell(r.cells, 'endDate')) ?? date;
       const st = parseTime(cell(r.cells, 'startTime'));
       const et = parseTime(cell(r.cells, 'endTime'));
+      for (const [fld, v, label] of [['startTime', st, 'Starting time'], ['endTime', et, 'Closing time']] as const) {
+        const raw = cell(r.cells, fld)?.text ?? '';
+        if (!v && raw && !isBlankMark(raw)) extra.push({ code: 'INVALID_TIME', severity: 'error', field: fld === 'startTime' ? 'startAt' : 'endAt', message: `${label} "${raw}" could not be read` });
+      }
       let endAt = endDate && et ? `${endDate} ${et}` : null;
       if (date && st && et && endDate === date && m.endDate === undefined && et < st) {
         if (b.overnightRule === 'next_day') {
@@ -201,61 +245,75 @@ export async function dutyRoutes(app: FastifyInstance) {
           extra.push({ code: 'ASSUMED_NEXT_DAY', severity: 'warning', field: 'endAt', message: `Closing time ${et} is earlier than starting time ${st}; treated as next-day closing (${addDays(date, 1)}). Confirm against the duty slip.` });
         }
       }
-      const catText = cell(r.cells, 'vehicleCategory')?.text ?? '';
-      const catId = catText ? catByName.get(catText.toLowerCase().replace(/\s+/g, '')) ?? null : null;
-      if (catText && !catId) extra.push({ code: 'UNKNOWN_CATEGORY', severity: 'error', field: 'vehicleCategoryId', message: `Vehicle type "${catText}" does not match a configured vehicle category` });
-      const input = {
-        contractId: b.contractId,
-        dutyDate: date ?? '1900-01-01',
-        vendorName: cell(r.cells, 'vendorName')?.text || null,
-        vehicleCategoryId: catId,
-        vehicleRegNo: (cell(r.cells, 'vehicleRegNo')?.text || '').trim() || '(missing)',
-        driverName: cell(r.cells, 'driverName')?.text || null,
-        fieldOfficer: cell(r.cells, 'fieldOfficer')?.text || null,
-        dutyTypeCode: (cell(r.cells, 'dutyType')?.text || b.defaultDutyType || null)?.toUpperCase() ?? null,
-        startKm: parseNumber(cell(r.cells, 'startKm')),
-        endKm: parseNumber(cell(r.cells, 'endKm')),
-        startAt: date && st ? `${date} ${st}` : null,
-        endAt,
-        toll: parseNumber(cell(r.cells, 'toll')),
-        parking: parseNumber(cell(r.cells, 'parking')),
-        remarks: cell(r.cells, 'remarks')?.text || null,
-        supportingDocRef: `${f.original_name} row ${r.rowNumber}`,
-        customFields: {},
-      };
-      return { rowNumber: r.rowNumber, input, extra };
-    });
+      const catText = (cell(r.cells, 'vehicleCategory')?.text ?? '').trim();
+      const catId = catText ? catByName.get(norm(catText)) ?? null : null;
+      if (catText && !catId) extra.push({ code: 'UNKNOWN_CATEGORY', severity: 'error', field: 'vehicleCategoryId', message: `Vehicle type "${catText}" does not match a vehicle category or its alias names (add it under System Settings → Vehicle categories)` });
+      const txt = (fld: ImportField) => { const v = cell(r.cells, fld)?.text.trim() ?? ''; return v && !isBlankMark(v) ? v : null; };
+      prepared.push({
+        rowNumber: r.rowNumber,
+        extra,
+        input: {
+          contractId,
+          dutyDate: date ?? '1900-01-01',
+          vendorName: txt('vendorName'),
+          vehicleCategoryId: catId,
+          vehicleModel: catText ? spelling.get(norm(catText)) ?? catText : null,
+          vehicleRegNo: txt('vehicleRegNo') ?? '(missing)',
+          driverName: txt('driverName'),
+          fieldOfficer: txt('fieldOfficer'),
+          dutyTypeCode: (txt('dutyType') || b.defaultDutyType || null)?.toUpperCase() ?? null,
+          startKm: parseNumber(cell(r.cells, 'startKm')),
+          endKm: parseNumber(cell(r.cells, 'endKm')),
+          startAt: date && st ? `${date} ${st}` : null,
+          endAt,
+          toll: parseNumber(cell(r.cells, 'toll')),
+          parking: parseNumber(cell(r.cells, 'parking')),
+          remarks: txt('remarks'),
+          supportingDocRef: `${f.original_name} row ${r.rowNumber}`,
+          customFields: {},
+        },
+      });
+    }
 
-    const results: { rowNumber: number; issues: unknown[]; parseError?: string; input: unknown }[] = [];
+    const results: { rowNumber: number; contractId: string; issues: unknown[]; parseError?: string; input: unknown }[] = [];
     const doWork = async (t: typeof db) => {
-      let batchId: string | null = null;
-      if (!b.dryRun) {
-        const batch = await t.one<{ id: string }>('INSERT INTO duty_import_batches(file_id, client_id, contract_id, row_count, created_by) VALUES ($1,$2,$3,$4,$5) RETURNING id', [b.fileId, k.client_id, k.id, prepared.length, req.user!.id]);
-        batchId = batch!.id;
-      }
+      const batches = new Map<string, string>();
       for (const p of prepared) {
+        const cid = String(p.input.contractId);
+        const { k, s } = await ctxFor(t, cid);
         const parsedRow = DutyInputSchema.safeParse(p.input);
         if (!parsedRow.success) {
-          results.push({ rowNumber: p.rowNumber, issues: p.extra, parseError: parsedRow.error.issues.map((x) => `${x.path.join('.')}: ${x.message}`).join('; '), input: p.input });
+          results.push({ rowNumber: p.rowNumber, contractId: cid, issues: p.extra, parseError: parsedRow.error.issues.map((x) => `${x.path.join('.')}: ${x.message}`).join('; '), input: p.input });
           continue;
         }
         const issues = [...p.extra, ...(await computeIssues(t, parsedRow.data, k, s))];
-        results.push({ rowNumber: p.rowNumber, issues, input: parsedRow.data });
+        results.push({ rowNumber: p.rowNumber, contractId: cid, issues, input: parsedRow.data });
         if (!b.dryRun) {
+          let batchId = batches.get(cid);
+          if (!batchId) {
+            const batch = await t.one<{ id: string }>('INSERT INTO duty_import_batches(file_id, client_id, contract_id, row_count, created_by) VALUES ($1,$2,$3,0,$4) RETURNING id', [b.fileId, k.client_id, k.id, req.user!.id]);
+            batchId = batch!.id;
+            batches.set(cid, batchId);
+          }
           const row = await insertDuty(t, parsedRow.data, k, issues, req.user!.id, 'import', batchId);
           await audit(t, req.user!.id, 'duty', String(row!.id), 'import', undefined, { file: f.original_name, row: p.rowNumber });
         }
       }
-      return batchId;
+      for (const [cid, id] of batches) await t.query('UPDATE duty_import_batches SET row_count = (SELECT count(*) FROM duties WHERE import_batch_id = $1) WHERE id = $1', [id]).then(() => cid);
+      return [...batches.values()];
     };
-    const batchId = b.dryRun ? await doWork(db) : await db.tx(doWork);
+    const batchIds = b.dryRun ? await doWork(db) : await db.tx(doWork);
     const failed = results.filter((r) => r.parseError);
+    const byContract: Record<string, number> = {};
+    for (const r of results) if (!r.parseError) byContract[r.contractId] = (byContract[r.contractId] ?? 0) + 1;
     return {
-      batchId,
+      batchIds,
       dryRun: b.dryRun,
       total: results.length,
       imported: b.dryRun ? 0 : results.length - failed.length,
       notImported: failed.length,
+      skippedByDepartment: Object.fromEntries(skipped),
+      byContract,
       withErrors: results.filter((r) => (r.issues as { severity: string }[]).some((i) => i.severity === 'error')).length,
       withWarnings: results.filter((r) => (r.issues as { severity: string }[]).some((i) => i.severity === 'warning')).length,
       results: results.slice(0, 500),

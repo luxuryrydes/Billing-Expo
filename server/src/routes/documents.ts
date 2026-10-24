@@ -5,6 +5,7 @@ import { audit } from '../lib/audit.js';
 import { perm } from '../lib/auth.js';
 import { badRequest, notFound, optText, parse, uuid } from '../lib/http.js';
 import { checkUpload, filePath, loadFile, saveFile } from '../lib/storage.js';
+import { profileDocument } from '../services/profile.js';
 import { aiExtract, FIELD_LABELS, ruleExtract, runWorker, type Candidate } from '../services/extraction.js';
 
 const DocType = z.enum(['contract', 'tender', 'scc', 'acc', 'rate_schedule', 'work_order', 'sample_invoice', 'billing_register', 'duty_sheet', 'other']);
@@ -23,8 +24,8 @@ export async function refreshConflicts(db: Db, contractId: string) {
 }
 
 export async function runExtraction(db: Db, versionId: string, useAi = true) {
-  const v = await db.one<{ id: string; file_id: string; contract_id: string | null; storage_path: string }>(
-    `SELECT dv.id, dv.file_id, d.contract_id, f.storage_path FROM document_versions dv JOIN documents d ON d.id = dv.document_id JOIN files f ON f.id = dv.file_id WHERE dv.id = $1`,
+  const v = await db.one<{ id: string; file_id: string; contract_id: string | null; storage_path: string; title: string }>(
+    `SELECT dv.id, dv.file_id, d.contract_id, d.title, f.storage_path FROM document_versions dv JOIN documents d ON d.id = dv.document_id JOIN files f ON f.id = dv.file_id WHERE dv.id = $1`,
     [versionId],
   );
   if (!v) return;
@@ -52,7 +53,7 @@ export async function runExtraction(db: Db, versionId: string, useAi = true) {
       }
       await t.query(
         `UPDATE document_versions SET extraction_status='done', extraction_method=$2, page_count=$3, extracted=$4 WHERE id=$1`,
-        [versionId, result.method + (useAi && !ai.note ? '+claude' : ''), result.pageCount, { pages: result.pages, warnings, questions: ai.questions }],
+        [versionId, result.method + (useAi && !ai.note ? '+claude' : ''), result.pageCount, { pages: result.pages, warnings, questions: ai.questions, profile: profileDocument(result.pages, v.title) }],
       );
     });
     if (v.contract_id) await refreshConflicts(db, v.contract_id);
@@ -95,6 +96,7 @@ export async function documentRoutes(app: FastifyInstance) {
         doc_type: DocType.default('other'),
         title: optText,
         run_ai: z.enum(['true', 'false']).default('true'),
+        note: optText,
       }),
       f,
     );
@@ -102,8 +104,13 @@ export async function documentRoutes(app: FastifyInstance) {
     const version = await db.tx(async (t) => {
       let docId = meta.document_id;
       if (docId) {
-        const d = await t.one('SELECT id FROM documents WHERE id = $1', [docId]);
+        const d = await t.one<{ client_id: string | null; contract_id: string | null }>('SELECT id, client_id, contract_id FROM documents WHERE id = $1', [docId]);
         if (!d) throw notFound('Document');
+        // A new version must stay with the same department / contract.
+        if ((meta.contract_id && d.contract_id && meta.contract_id !== d.contract_id) || (meta.client_id && d.client_id && meta.client_id !== d.client_id)) {
+          throw badRequest('That document belongs to a different department or contract; upload this file as a new document instead.');
+        }
+        await t.query('UPDATE documents SET updated_at = now() WHERE id = $1', [docId]);
       } else {
         let clientId = meta.client_id ?? null;
         if (meta.contract_id && !clientId) clientId = (await t.one<{ client_id: string }>('SELECT client_id FROM contracts WHERE id = $1', [meta.contract_id]))?.client_id ?? null;
@@ -114,9 +121,9 @@ export async function documentRoutes(app: FastifyInstance) {
         docId = d!.id;
       }
       const v = await t.one<{ id: string; version_no: number }>(
-        `INSERT INTO document_versions(document_id, version_no, file_id, uploaded_by)
-         VALUES ($1, (SELECT COALESCE(max(version_no),0)+1 FROM document_versions WHERE document_id = $1), $2, $3) RETURNING id, version_no, document_id`,
-        [docId, stored.id, req.user!.id],
+        `INSERT INTO document_versions(document_id, version_no, file_id, uploaded_by, note)
+         VALUES ($1, (SELECT COALESCE(max(version_no),0)+1 FROM document_versions WHERE document_id = $1), $2, $3, $4) RETURNING id, version_no, document_id`,
+        [docId, stored.id, req.user!.id, meta.note ?? null],
       );
       await audit(t, req.user!.id, 'document', docId!, 'upload_version', undefined, { version: v!.version_no, file: stored.original_name, sha256: stored.sha256 });
       return v!;
@@ -126,6 +133,53 @@ export async function documentRoutes(app: FastifyInstance) {
     return version;
   });
 
+  /**
+   * Before an upload: finds documents this file would update — only within the same contract
+   * (or the same department when there is no contract) and the same document type. A matching
+   * file name alone never links documents of different departments or contracts.
+   */
+  app.post('/documents/match', { preHandler: perm('document.upload') }, async (req) => {
+    const b = parse(z.object({ client_id: uuid.nullable().optional(), contract_id: uuid.nullable().optional(), doc_type: z.string(), file_name: z.string(), sha256: z.string().optional() }), req.body);
+    if (!b.client_id && !b.contract_id) return { matches: [], identical: null };
+    const rows = await db.query<{ id: string; title: string; doc_type: string; latest_version: number; original_name: string; sha256: string; uploaded_at: string; uploaded_by_name: string | null }>(
+      `SELECT d.id, d.title, d.doc_type, v.version_no AS latest_version, f.original_name, f.sha256, v.uploaded_at, u.name AS uploaded_by_name
+       FROM documents d JOIN LATERAL (SELECT * FROM document_versions x WHERE x.document_id = d.id ORDER BY version_no DESC LIMIT 1) v ON true
+       JOIN files f ON f.id = v.file_id LEFT JOIN app_users u ON u.id = v.uploaded_by
+       WHERE d.doc_type = $1 AND (($2::uuid IS NOT NULL AND d.contract_id = $2) OR ($2::uuid IS NULL AND d.contract_id IS NULL AND d.client_id = $3))
+       ORDER BY v.uploaded_at DESC`,
+      [b.doc_type, b.contract_id ?? null, b.client_id ?? null],
+    );
+    const base = (n: string) => n.toLowerCase().replace(/\.[a-z0-9]+$/, '');
+    const matches = rows.map((r) => ({ ...r, sameName: base(r.original_name) === base(b.file_name) || r.title.toLowerCase() === base(b.file_name), sameFile: !!b.sha256 && r.sha256 === b.sha256 }))
+      .sort((a, c) => Number(c.sameFile) - Number(a.sameFile) || Number(c.sameName) - Number(a.sameName));
+    return { matches, identical: matches.find((m) => m.sameFile) ?? null };
+  });
+
+  /** Makes an older version current again by adding it as a new version (nothing is deleted). */
+  app.post('/document-versions/:id/restore', { preHandler: perm('document.upload') }, async (req) => {
+    const { id } = req.params as { id: string };
+    const old = await db.one<{ document_id: string; file_id: string; version_no: number; extracted: unknown; extraction_status: string; extraction_method: string | null; page_count: number | null }>('SELECT * FROM document_versions WHERE id = $1', [id]);
+    if (!old) throw notFound('Document version');
+    const v = await db.tx(async (t) => {
+      const nv = await t.one<{ id: string; version_no: number }>(
+        `INSERT INTO document_versions(document_id, version_no, file_id, uploaded_by, note, extraction_status, extraction_method, page_count, extracted)
+         VALUES ($1, (SELECT max(version_no)+1 FROM document_versions WHERE document_id = $1), $2, $3, $4, $5, $6, $7, $8) RETURNING id, version_no`,
+        [old.document_id, old.file_id, req.user!.id, `Restored from version ${old.version_no}`, old.extraction_status, old.extraction_method, old.page_count, old.extracted],
+      );
+      await t.query('UPDATE documents SET updated_at = now() WHERE id = $1', [old.document_id]);
+      await audit(t, req.user!.id, 'document', old.document_id, 'restore_version', undefined, { from: old.version_no, to: nv!.version_no });
+      return nv!;
+    });
+    if (old.extraction_status === 'done') {
+      // Copy the reviewed candidates too, so earlier review decisions are not lost.
+      await db.query(
+        `INSERT INTO extracted_items(document_version_id, contract_id, field_key, label, value, unit, qualifier, source_page, source_text, confidence, method, status, edited_value, review_note, reviewed_by, reviewed_at, conflict)
+         SELECT $2, contract_id, field_key, label, value, unit, qualifier, source_page, source_text, confidence, method, status, edited_value, review_note, reviewed_by, reviewed_at, conflict FROM extracted_items WHERE document_version_id = $1`,
+        [id, v.id]);
+    }
+    return v;
+  });
+
   app.get('/documents/:id', { preHandler: perm('view') }, async (req) => {
     const { id } = req.params as { id: string };
     const d = await db.one(
@@ -133,7 +187,7 @@ export async function documentRoutes(app: FastifyInstance) {
        LEFT JOIN clients c ON c.id = d.client_id LEFT JOIN contracts k ON k.id = d.contract_id WHERE d.id = $1`, [id]);
     if (!d) throw notFound('Document');
     const versions = await db.query(
-      `SELECT v.id, v.version_no, v.uploaded_at, v.extraction_status, v.extraction_error, v.extraction_method, v.page_count,
+      `SELECT v.id, v.version_no, v.uploaded_at, v.note, v.extraction_status, v.extraction_error, v.extraction_method, v.page_count,
               v.extracted->'warnings' AS warnings, v.extracted->'questions' AS questions, f.id AS file_id, f.original_name, f.size_bytes, f.sha256, u.name AS uploaded_by_name
        FROM document_versions v JOIN files f ON f.id = v.file_id LEFT JOIN app_users u ON u.id = v.uploaded_by WHERE v.document_id = $1 ORDER BY v.version_no DESC`, [id]);
     return { ...d, versions };

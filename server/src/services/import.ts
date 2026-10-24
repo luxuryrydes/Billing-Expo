@@ -8,7 +8,7 @@ import { Readable } from 'node:stream';
 
 export const IMPORT_FIELDS = {
   dutyDate: ['date', 'duty date', 'dt', 'duty dt', 'date of duty'],
-  vendorName: ['vendor', 'vendor name', 'supplier'],
+  vendorName: ['vendor', 'vendor name', 'vender', 'vender name', 'supplier'],
   vehicleCategory: ['vehicle type', 'type of vehicle', 'vehicle category', 'category', 'car type', 'vehicle', 'vehicle model'],
   vehicleRegNo: ['vehicle no', 'vehicle number', 'vehicle no.', 'regn no', 'reg no', 'registration no', 'registration number', 'car no', 'vehicle regn no', 'vehicle reg no'],
   driverName: ['driver', 'driver name', 'name of driver'],
@@ -134,6 +134,7 @@ export function parseDate(c: CellVal | undefined): string | null {
 export function parseTime(c: CellVal | undefined): string | null {
   if (!c) return null;
   if (c.time && !c.text.match(/[ap]\.?m/i)) return c.time;
+  if (isBlankMark(c.text)) return null;
   const s = c.text.trim().toLowerCase().replace(/\s+/g, ' ');
   let m = /^(\d{1,2})[:.](\d{2})(?::\d{2})? ?([ap])\.?m?\.?$/.exec(s);
   if (m) {
@@ -153,6 +154,39 @@ export function parseTime(c: CellVal | undefined): string | null {
 export function parseNumber(c: CellVal | undefined): string | null {
   if (!c) return null;
   if (c.num !== undefined) return c.num;
+  if (isBlankMark(c.text)) return null;
   const s = c.text.replace(/[,₹\s]/g, '').replace(/^rs\.?/i, '');
   return /^-?\d+(\.\d+)?$/.test(s) ? s : s === '' ? null : s; // keep invalid text so validation reports it
+}
+
+/** Placeholders duty sheets use for "not recorded": ?, -, ., NA, nil. Treated as empty, never as a value. */
+export function isBlankMark(s: string): boolean {
+  return /^(\?+|-+|\.+|n\/?a|nil|none)$/i.test(s.trim());
+}
+
+/** Reads a duty sheet from Excel, CSV or a PDF table (via the document worker). */
+export async function readAnySheet(buf: Buffer, ext: string, storedPath: string): Promise<SheetData> {
+  if (ext !== '.pdf') return readSheet(buf, ext);
+  const { runWorker } = await import('./extraction.js');
+  const res = await runWorker(storedPath);
+  const rows = res.pages.flatMap((p) => (p.tables ?? []).flatMap((t) => t.map((r) => ({ page: p.page, cells: r.map((c) => (c ?? '').replace(/\s+/g, ' ').trim()) }))));
+  if (!rows.length) throw new Error('No table was found in the PDF. Scanned sheets need OCR or an Excel copy.');
+  let headerIdx = 0;
+  let best = -1;
+  for (let i = 0; i < Math.min(15, rows.length); i++) {
+    const n = Object.keys(autoMap(rows[i].cells)).length;
+    if (n > best) { best = n; headerIdx = i; }
+  }
+  const headers = rows[headerIdx].cells;
+  const sig = headers.join('|').toLowerCase();
+  const width = headers.length;
+  const data: SheetData['rows'] = [];
+  rows.forEach((r, i) => {
+    if (i <= headerIdx) return;
+    if (r.cells.join('|').toLowerCase() === sig) return; // header repeated on each page
+    if (r.cells.every((c) => !c)) return;
+    const cells = Array.from({ length: width }, (_, j) => ({ text: r.cells[j] ?? '' }));
+    data.push({ rowNumber: i + 1, cells });
+  });
+  return { sheetName: `PDF (${res.pages.length} pages)`, headerRow: headerIdx + 1, headers, rows: data };
 }

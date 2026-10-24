@@ -3,7 +3,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api, errorText, qs } from '../api';
 import { useAuth } from '../auth';
-import { ErrorBox, Field, Modal, PageHead, useAction, useToast } from '../components/ui';
+import { ErrorBox, PageHead, useToast } from '../components/ui';
+import { DutyImportWizard } from '../components/DutyImportWizard';
 import { today } from '../format';
 import { useCategories, useContracts, useDutyTypes, type Contract } from '../lookups';
 
@@ -236,7 +237,7 @@ export function DutyEntryPage() {
       <PageHead title="Daily Duty Entry" sub="Type or paste rows from Excel (Ctrl+V on any cell). Enter moves down, Ctrl+D copies the previous row. Vehicle numbers are stored exactly as typed.">
         <select value={contractId} onChange={(e) => { setContractId(e.target.value); load(e.target.value, date); }}><option value="">Select contract…</option>{contracts.data?.filter((k) => k.status !== 'terminated').map((k) => <option key={k.id} value={k.id}>{k.client_name} — {k.reference_no}</option>)}</select>
         <input type="date" value={date} onChange={(e) => { setDate(e.target.value); load(contractId, e.target.value); }} />
-        {can('duty.write') && <button className="btn" disabled={!contractId} onClick={() => setImporting(true)}>Import Excel / CSV</button>}
+        {can('duty.write') && <button className="btn" onClick={() => setImporting(true)}>Import duty sheet</button>}
         {can('duty.write') && <button className="btn primary" disabled={!contractId || saving || dirtyCount === 0} onClick={save}>Save {dirtyCount ? `(${dirtyCount})` : ''}</button>}
       </PageHead>
       <ErrorBox error={error} />
@@ -287,75 +288,8 @@ export function DutyEntryPage() {
           <p className="small muted">Saved duties for other dates are in the <Link to="/duties">Duty Register</Link>.</p>
         </>
       )}
-      {importing && <ImportWizard contractId={contractId} onClose={() => setImporting(false)} onDone={() => { setImporting(false); load(); }} />}
+      {importing && <DutyImportWizard contractId={contractId || undefined} onClose={() => setImporting(false)} onDone={() => { setImporting(false); load(); }} />}
     </>
   );
 }
 
-const FIELD_LABELS: Record<string, string> = {
-  dutyDate: 'Duty date', vendorName: 'Vendor', vehicleCategory: 'Vehicle type', vehicleRegNo: 'Vehicle no.', driverName: 'Driver', department: 'Department (ignored)', fieldOfficer: 'User / officer',
-  startKm: 'Starting km', endKm: 'Closing km', startTime: 'Starting time', endTime: 'Closing time', endDate: 'Closing date', dutyType: 'Duty type', toll: 'Toll', parking: 'Parking', remarks: 'Remarks',
-};
-
-function ImportWizard({ contractId, onClose, onDone }: { contractId: string; onClose: () => void; onDone: () => void }) {
-  const [file, setFile] = useState<File | null>(null);
-  const [prev, setPrev] = useState<any>(null);
-  const [mapping, setMapping] = useState<Record<string, number>>({});
-  const [overnight, setOvernight] = useState<'next_day' | 'flag'>('next_day');
-  const [dutyType, setDutyType] = useState('LOCAL');
-  const [dry, setDry] = useState<any>(null);
-  const { run, busy } = useAction();
-  const types = useDutyTypes();
-  const upload = async () => {
-    const fd = new FormData();
-    fd.append('file', file!);
-    const r = await run(() => api.post('/duties/import/preview', fd));
-    if (r) { setPrev(r); setMapping(r.mapping); setDry(null); }
-  };
-  const body = (dryRun: boolean) => ({ fileId: prev.fileId, contractId, mapping, overnightRule: overnight, defaultDutyType: dutyType, dryRun });
-  return (
-    <Modal title="Import duty sheet" onClose={onClose} wide>
-      {!prev ? (
-        <div className="grid">
-          <Field label="Excel (.xlsx) or CSV duty sheet" required><input type="file" accept=".xlsx,.csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} /></Field>
-          <p className="small muted">The header row is detected automatically. Vehicle numbers are read as displayed in the sheet (leading zeros kept). Nothing is saved until you confirm.</p>
-          <div className="row end"><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={!file || busy} onClick={upload}>Read sheet</button></div>
-        </div>
-      ) : (
-        <div className="grid">
-          <div className="small muted">Sheet “{prev.sheetName}”, header row {prev.headerRow}, {prev.rowCount} data rows.</div>
-          <div className="grid g4">
-            {Object.keys(FIELD_LABELS).map((f) => (
-              <Field key={f} label={FIELD_LABELS[f]}>
-                <select value={mapping[f] ?? ''} onChange={(e) => { const n = { ...mapping }; if (e.target.value === '') delete n[f]; else n[f] = Number(e.target.value); setMapping(n); setDry(null); }}>
-                  <option value="">(not in sheet)</option>{prev.headers.map((h: string, i: number) => <option key={i} value={i}>{h || `Column ${i + 1}`}</option>)}
-                </select>
-              </Field>
-            ))}
-          </div>
-          <div className="grid g2">
-            <Field label="Closing time earlier than starting time (no closing date column)"><select value={overnight} onChange={(e) => setOvernight(e.target.value as never)}><option value="next_day">Treat as next day and flag a warning to confirm</option><option value="flag">Keep as entered (will be an error)</option></select></Field>
-            <Field label="Duty type when not in sheet"><select value={dutyType} onChange={(e) => setDutyType(e.target.value)}>{types.data?.map((t) => <option key={t.code} value={t.code}>{t.name}</option>)}</select></Field>
-          </div>
-          <div className="scroll" style={{ maxHeight: 220 }}>
-            <table className="t"><thead><tr>{prev.headers.map((h: string, i: number) => <th key={i}>{h}</th>)}</tr></thead>
-              <tbody>{prev.sample.map((r: any) => <tr key={r.rowNumber}>{r.cells.map((c: string, i: number) => <td key={i} className="small">{c}</td>)}</tr>)}</tbody></table>
-          </div>
-          {dry && (
-            <div className="panel">
-              <b>Check result:</b> {dry.total} rows · {dry.withErrors} with errors · {dry.withWarnings} with warnings · {dry.notImported} cannot be imported
-              <div className="scroll" style={{ maxHeight: 220 }}><table className="t"><tbody>
-                {dry.results.filter((r: any) => r.parseError || r.issues.length).map((r: any) => <tr key={r.rowNumber}><td>Row {r.rowNumber}</td><td className="small">{r.parseError && <span style={{ color: 'var(--err)' }}>{r.parseError}</span>}{r.issues.map((x: any, i: number) => <div key={i} style={{ color: x.severity === 'error' ? 'var(--err)' : 'var(--warn)' }}>{x.message}</div>)}</td></tr>)}
-              </tbody></table></div>
-            </div>
-          )}
-          <div className="row end">
-            <button className="btn" onClick={() => setPrev(null)}>Back</button>
-            <button className="btn" disabled={busy} onClick={async () => { const r = await run(() => api.post('/duties/import/commit', body(true))); if (r) setDry(r); }}>Check rows</button>
-            <button className="btn primary" disabled={busy || !dry} onClick={async () => { const r = await run(() => api.post('/duties/import/commit', body(false))); if (r) { alert(`Imported ${r.imported} duty row(s). ${r.withErrors} have errors and ${r.withWarnings} have warnings — review them in the Duty Register.`); onDone(); } }}>Import {dry ? dry.total - dry.notImported : ''} rows</button>
-          </div>
-        </div>
-      )}
-    </Modal>
-  );
-}

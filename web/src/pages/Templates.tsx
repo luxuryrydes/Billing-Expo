@@ -6,6 +6,7 @@ import { useAuth } from '../auth';
 import { ErrorBox, Field, Loading, Modal, PageHead, Status, Tabs, useAction, useToast } from '../components/ui';
 import { dt } from '../format';
 import { useClients, useContracts } from '../lookups';
+import { SampleFormatDialog } from './BillingExport';
 
 export function TemplatesPage() {
   const { can } = useAuth();
@@ -14,10 +15,12 @@ export function TemplatesPage() {
   const [clientId, setClientId] = useState(sp.get('client') ?? '');
   const q = useQuery({ queryKey: ['templates', clientId], queryFn: () => api.get<any[]>(`/templates${qs({ clientId })}`) });
   const [adding, setAdding] = useState(false);
+  const [sampling, setSampling] = useState(false);
   return (
     <>
       <PageHead title="Billing Templates" sub="Each department's bill layout — designed here or mapped onto its own Excel workbook. Versions are locked once approved.">
         <select value={clientId} onChange={(e) => setClientId(e.target.value)}><option value="">All departments</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+        {can('template.write') && <button className="btn" onClick={() => setSampling(true)}>Import sample bill / format</button>}
         {can('template.write') && <button className="btn primary" onClick={() => setAdding(true)}>New template</button>}
       </PageHead>
       <ErrorBox error={q.error} />
@@ -36,6 +39,7 @@ export function TemplatesPage() {
         )}
       </div>
       {adding && <NewTemplate onClose={() => setAdding(false)} />}
+      {sampling && <SampleFormatDialog onClose={() => { setSampling(false); q.refetch(); }} />}
     </>
   );
 }
@@ -102,7 +106,7 @@ export function TemplateVersionPage() {
     fd.append('file', file);
     if (await run(() => api.post(`/template-versions/${id}/upload/${kind}`, fd), 'Uploaded')) q.refetch();
   };
-  const dutyKeys: Record<string, string> = cols.data?.[layout.rowMode === 'line' ? 'line' : 'duty'] ?? {};
+  const dutyKeys: Record<string, string> = cols.data?.[layout.rowMode === 'line' ? 'line' : layout.rowMode === 'block' ? 'block' : 'duty'] ?? {};
   return (
     <>
       <PageHead title={`${v.template_name} — v${v.version_no}`} sub={<><Status s={v.status} /> {v.approved_by_name && <span className="small muted">approved by {v.approved_by_name} {dt(v.approved_at)}</span>}</>}>
@@ -137,10 +141,34 @@ export function TemplateVersionPage() {
             {tab === 'columns' && (
               <div className="panel">
                 <div className="grid g3">
-                  <Field label="One row per"><select value={layout.rowMode} onChange={(e) => upd((l) => (l.rowMode = e.target.value))}><option value="duty">Duty</option><option value="line">Charge line</option></select></Field>
+                  <Field label="Rows"><select value={layout.rowMode} onChange={(e) => upd((l) => (l.rowMode = e.target.value))}><option value="duty">One row per duty</option><option value="line">One row per charge</option><option value="block">Duty blocks (heading + one row per charge)</option></select></Field>
                   <Field label="Sort by"><select value={layout.sortBy} onChange={(e) => upd((l) => (l.sortBy = e.target.value))}><option value="date">Date</option><option value="vehicle">Vehicle</option></select></Field>
-                  <Field label="Subtotals by"><select value={layout.groupBy} onChange={(e) => upd((l) => (l.groupBy = e.target.value))}><option value="none">None</option><option value="vehicle">Vehicle</option><option value="date">Date</option></select></Field>
+                  {layout.rowMode !== 'block' && <Field label="Subtotals by"><select value={layout.groupBy} onChange={(e) => upd((l) => (l.groupBy = e.target.value))}><option value="none">None</option><option value="vehicle">Vehicle</option><option value="date">Date</option></select></Field>}
+                  <Field label="Dates"><select value={layout.dateFormat ?? 'dd-mm-yyyy'} onChange={(e) => upd((l) => (l.dateFormat = e.target.value))}><option value="dd-mm-yyyy">01-09-2026</option><option value="dd.mm.yyyy">01.09.2026</option><option value="dd/mm/yyyy">01/09/2026</option></select></Field>
+                  <Field label="Amounts"><select value={layout.numberStyle ?? 'indian'} onChange={(e) => upd((l) => (l.numberStyle = e.target.value))}><option value="indian">1,23,456.00</option><option value="plain">123456.00</option></select></Field>
                 </div>
+                {layout.rowMode === 'block' && layout.block && (
+                  <div className="panel" style={{ marginTop: 10, background: '#fafbfc' }}>
+                    <h3>Duty block wording</h3>
+                    <div className="grid g2">
+                      <Field label="Heading row" hint="{vehicleShort} {vehicleRegNo} {vehicleModel} {vehicleCategory} {driverName} {fieldOfficer}"><input value={layout.block.header} onChange={(e) => upd((l) => (l.block.header = e.target.value))} /></Field>
+                      <Field label="Package row" hint="{includedKm} {includedHours}"><input value={layout.block.packageLabel} onChange={(e) => upd((l) => (l.block.packageLabel = e.target.value))} /></Field>
+                      <Field label="Running row (blank = none)" hint="{totalKm} {totalHours}"><input value={layout.block.runningLabel} onChange={(e) => upd((l) => (l.block.runningLabel = e.target.value))} /></Field>
+                      <Field label="Digits of vehicle number shown ({vehicleShort})"><input type="number" value={layout.block.vehicleShortDigits} onChange={(e) => upd((l) => (l.block.vehicleShortDigits = Number(e.target.value)))} /></Field>
+                    </div>
+                    <div className="row" style={{ marginTop: 8 }}>
+                      <label className="check"><input type="checkbox" checked={layout.block.mergeReimbursements} onChange={(e) => upd((l) => (l.block.mergeReimbursements = e.target.checked))} />Show toll + parking as one row:</label>
+                      <input value={layout.block.reimbursementLabel} onChange={(e) => upd((l) => (l.block.reimbursementLabel = e.target.value))} />
+                      <label className="check"><input type="checkbox" checked={layout.block.blankRowBetween} onChange={(e) => upd((l) => (l.block.blankRowBetween = e.target.checked))} />Blank row between duties</label>
+                    </div>
+                    <div className="grid g4" style={{ marginTop: 8 }}>
+                      {['EXKM', 'EXHR', 'NIGHT', 'OUTDAY'].map((code) => (
+                        <Field key={code} label={`Label for ${code}`}><input value={layout.block.componentLabels?.[code] ?? ''} placeholder="rate scheme label" onChange={(e) => upd((l) => { l.block.componentLabels = { ...(l.block.componentLabels ?? {}) }; if (e.target.value) l.block.componentLabels[code] = e.target.value; else delete l.block.componentLabels[code]; })} /></Field>
+                      ))}
+                    </div>
+                    <p className="small muted">Columns for blocks: sno, dutyDate, description, unit, rate, taxable, nonTaxable, amount.</p>
+                  </div>
+                )}
                 <table className="t cols-editor" style={{ marginTop: 10 }}>
                   <thead><tr><th>Field</th><th>Heading</th><th>Group heading</th><th>Format</th><th>Width</th><th>Total</th><th /></tr></thead>
                   <tbody>{layout.columns.map((c: any, i: number) => (
@@ -163,6 +191,7 @@ export function TemplateVersionPage() {
             {tab === 'summary' && (
               <div className="panel grid">
                 <h3>Summary rows</h3>
+                <Field label="Wording of each tax row (for “taxLines”)" hint="{name} {taxType} {rate} {base} — e.g. “{taxType}-{rate}%” prints IGST-18%"><input value={layout.taxLabel ?? '{name} @ {rate}% on {base}'} onChange={(e) => upd((l) => (l.taxLabel = e.target.value))} /></Field>
                 {layout.summary.map((s: any, i: number) => (
                   <div className="row" key={i}><input style={{ flex: 1 }} value={s.label} onChange={(e) => upd((l) => (l.summary[i].label = e.target.value))} />
                     <select value={s.value} onChange={(e) => upd((l) => (l.summary[i].value = e.target.value))}>{['chargesTotal', 'reimbursementsTotal', 'deductionsTotal', 'taxableValue', 'taxLines', 'tax:CGST', 'tax:SGST', 'tax:IGST', 'taxTotal', 'nonTaxableTotal', 'roundOff', 'preRoundTotal', 'grandTotal'].map((x) => <option key={x}>{x}</option>)}</select>

@@ -9,3 +9,5 @@ __pycache__/
 coverage/
 server/fixtures/dri-sep.report.json
 .claude/
+server/fixtures/dri/
+server/fixtures/master/

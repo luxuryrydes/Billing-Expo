@@ -78,6 +78,7 @@ function toRenderDuty(r: Record<string, unknown>): RenderDuty {
     toll: (r.toll_amount as string) ?? null, parking: (r.parking_amount as string) ?? null, otherCharges: (r.other_charges as string) ?? null,
     customFields: (r.custom_fields as Record<string, unknown>) ?? {}, driverName: (r.driver_name as string) ?? null, fieldOfficer: (r.field_officer as string) ?? null,
     remarks: (r.remarks as string) ?? null,
+    vehicleModel: (r.vehicle_model as string) ?? null,
   };
 }
 
@@ -127,7 +128,7 @@ export async function calculate(db: Db, billId: string, userId: string) {
       period: { start: bill.period_start, end: bill.period_end },
       bill: { billDate: bill.bill_date ?? bill.period_end, revisionNo: bill.revision_no },
       client: client!, supplier: supplier ?? null,
-      contract: { id: k!.id, title: k!.title, reference_no: k!.reference_no, po_number: k!.po_number, tax_mode: k!.tax_mode, tax_level: k!.tax_level, invoice_rounding: k!.invoice_rounding },
+      contract: { id: k!.id, title: k!.title, reference_no: k!.reference_no, po_number: k!.po_number, sac_code: k!.sac_code, tax_mode: k!.tax_mode, tax_level: k!.tax_level, invoice_rounding: k!.invoice_rounding },
       settings, schemes, taxRules, duties, excluded: bill.excluded_duties,
     };
     const snap = await t.one<{ id: string }>(
@@ -214,13 +215,28 @@ export async function loadBillContext(db: Db, billId: string): Promise<BillConte
 export async function nextBillNo(db: Db, bill: BillRow): Promise<string> {
   const k = await db.one<{ bill_no_format: string }>('SELECT bill_no_format FROM contracts WHERE id = $1', [bill.contract_id]);
   const c = await db.one<{ short_code: string }>('SELECT short_code FROM clients WHERE id = $1', [bill.client_id]);
-  const [y, m] = bill.period_end.split('-').map(Number);
+  // GST invoice series run per financial year of the invoice date.
+  const ref = bill.bill_date ?? bill.period_end;
+  const [y, m, d] = ref.split('-').map(Number);
   const fyStart = m >= 4 ? y : y - 1;
   const fy = `${fyStart}-${String((fyStart + 1) % 100).padStart(2, '0')}`;
-  const base = k!.bill_no_format.replace('{CLIENT}', c!.short_code).replace('{YYYY}', String(y)).replace('{MM}', String(m).padStart(2, '0')).replace('{FY}', fy);
-  const prefix = base.split('{SEQ}')[0];
-  const n = await db.one<{ n: number }>(`SELECT count(DISTINCT bill_no)::int AS n FROM bills WHERE bill_no LIKE $1 || '%' AND revision_no = 0`, [prefix]);
-  return base.replace('{SEQ}', String((n?.n ?? 0) + 1).padStart(3, '0'));
+  const fys = `${String(fyStart % 100).padStart(2, '0')}-${String((fyStart + 1) % 100).padStart(2, '0')}`;
+  const [py, pm, pd] = bill.period_start.split('-');
+  const base = k!.bill_no_format.replace('{CLIENT}', c!.short_code).replace('{YYYY}', String(y)).replace('{MM}', String(m).padStart(2, '0'))
+    .replace('{DD}', String(d).padStart(2, '0')).replace('{PYYYY}', py).replace('{PMM}', pm).replace('{PDD}', pd).replace('{FYS}', fys).replace('{FY}', fy);
+  const seq = /\{SEQ(?::(\d+))?\}/.exec(base);
+  if (!seq) return base;
+  const width = Number(seq[1] ?? 3);
+  const prefix = base.slice(0, seq.index);
+  const suffix = base.slice(seq.index + seq[0].length);
+  // Highest number already issued in this series, or the configured continuation of an existing paper series.
+  const issued = await db.query<{ bill_no: string }>(`SELECT DISTINCT bill_no FROM bills WHERE bill_no LIKE $1 || '%' AND revision_no = 0`, [prefix]);
+  const maxIssued = issued.reduce((mx, r) => {
+    const n = Number(r.bill_no.slice(prefix.length, r.bill_no.length - suffix.length || undefined));
+    return Number.isFinite(n) && n > mx ? n : mx;
+  }, 0);
+  const configured = (await db.one<{ value: Record<string, number> }>(`SELECT value FROM app_settings WHERE key = 'billSeriesNext'`))?.value?.[prefix] ?? 1;
+  return `${prefix}${String(Math.max(maxIssued + 1, configured)).padStart(width, '0')}${suffix}`;
 }
 
 export interface Reconciliation { ok: boolean; checks: { name: string; ok: boolean; detail: string }[] }
@@ -256,7 +272,9 @@ export async function generateOutputs(db: Db, billId: string, userId: string) {
   try {
     const pdfText = (await runWorker(tmp, 60_000)).pages.map((p) => p.text).join('\n');
     const flat = pdfText.replace(/\s+/g, ' ');
-    checks.push({ name: 'PDF contains grand total', ok: flat.includes(inr(snapTotal)), detail: inr(snapTotal) });
+    // The total as this layout prints it (Indian grouping or plain digits).
+    const shown = model.summary.find((x) => x.strong)?.value ?? inr(snapTotal);
+    checks.push({ name: 'PDF contains grand total', ok: flat.includes(shown), detail: shown });
     checks.push({ name: 'PDF contains bill number', ok: flat.includes(ctx.bill.billNo), detail: ctx.bill.billNo });
     if (model.columns.some((c) => c.key === 'vehicleRegNo')) {
       const missing = [...regs].filter((r) => !flat.includes(r));

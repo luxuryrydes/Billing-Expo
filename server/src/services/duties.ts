@@ -18,6 +18,7 @@ export const DutyInputSchema = z.object({
   vendorName: optText,
   vehicleCategoryId: uuid.nullable().optional(),
   vehicleRegNo: z.string().trim().min(1, 'Vehicle number is required').max(20),
+  vehicleModel: optText,
   driverName: optText,
   fieldOfficer: optText,
   dutyTypeCode: optText,
@@ -101,23 +102,23 @@ export function dutyRowToApi(r: Record<string, unknown>) {
     vehicleRegNo: r.vehicle_reg_no, driverName: r.driver_name, fieldOfficer: r.field_officer, dutyTypeCode: r.duty_type_code,
     startKm: r.start_km, endKm: r.end_km, startAt: typeof r.start_at === 'string' ? r.start_at.slice(0, 16) : null, endAt: typeof r.end_at === 'string' ? r.end_at.slice(0, 16) : null,
     toll: r.toll_amount, parking: r.parking_amount, otherCharges: r.other_charges, customFields: r.custom_fields, remarks: r.remarks,
-    supportingDocRef: r.supporting_doc_ref, source: r.source, status: r.status, issues: r.issues, errorCount: r.error_count, warningCount: r.warning_count,
+    supportingDocRef: r.supporting_doc_ref, vehicleModel: r.vehicle_model ?? null, source: r.source, status: r.status, issues: r.issues, errorCount: r.error_count, warningCount: r.warning_count,
     billId: r.bill_id ?? null, billNo: r.bill_no ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
 
 const COLS = (d: DutyInputT) => [
   d.dutyDate, d.vendorName, d.vehicleCategoryId ?? null, d.vehicleRegNo, regKey(d.vehicleRegNo), d.driverName, d.fieldOfficer, d.dutyTypeCode,
-  d.startKm, d.endKm, d.startAt, d.endAt, d.toll, d.parking, d.otherCharges, JSON.stringify(d.customFields ?? {}), d.remarks, d.supportingDocRef,
+  d.startKm, d.endKm, d.startAt, d.endAt, d.toll, d.parking, d.otherCharges, JSON.stringify(d.customFields ?? {}), d.remarks, d.supportingDocRef, d.vehicleModel ?? null,
 ];
 
 export async function insertDuty(db: Db, d: DutyInputT, k: ContractCtx, issues: ValidationIssue[], userId: string, source: 'manual' | 'import' = 'manual', batchId: string | null = null) {
   const errs = issues.filter((i) => i.severity === 'error').length;
   return db.one<Record<string, unknown>>(
     `INSERT INTO duties(duty_date, vendor_name, vehicle_category_id, vehicle_reg_no, vehicle_reg_key, driver_name, field_officer, duty_type_code,
-       start_km, end_km, start_at, end_at, toll_amount, parking_amount, other_charges, custom_fields, remarks, supporting_doc_ref,
+       start_km, end_km, start_at, end_at, toll_amount, parking_amount, other_charges, custom_fields, remarks, supporting_doc_ref, vehicle_model,
        client_id, contract_id, issues, error_count, warning_count, source, import_batch_id, created_by, updated_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17,$18,$19,$20,$21::jsonb,$22,$23,$24,$25,$26,$26) RETURNING *`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17,$18,$19,$20,$21,$22::jsonb,$23,$24,$25,$26,$27,$27) RETURNING *`,
     [...COLS(d), k.client_id, k.id, JSON.stringify(issues), errs, issues.length - errs, source, batchId, userId],
   );
 }
@@ -126,10 +127,10 @@ export async function updateDuty(db: Db, d: DutyInputT, k: ContractCtx, issues: 
   const errs = issues.filter((i) => i.severity === 'error').length;
   return db.one<Record<string, unknown>>(
     `UPDATE duties SET duty_date=$1, vendor_name=$2, vehicle_category_id=$3, vehicle_reg_no=$4, vehicle_reg_key=$5, driver_name=$6, field_officer=$7, duty_type_code=$8,
-       start_km=$9, end_km=$10, start_at=$11, end_at=$12, toll_amount=$13, parking_amount=$14, other_charges=$15, custom_fields=$16::jsonb, remarks=$17, supporting_doc_ref=$18,
-       client_id=$19, contract_id=$20, issues=$21::jsonb, error_count=$22, warning_count=$23, updated_by=$24, updated_at=now(),
+       start_km=$9, end_km=$10, start_at=$11, end_at=$12, toll_amount=$13, parking_amount=$14, other_charges=$15, custom_fields=$16::jsonb, remarks=$17, supporting_doc_ref=$18, vehicle_model=$19,
+       client_id=$20, contract_id=$21, issues=$22::jsonb, error_count=$23, warning_count=$24, updated_by=$25, updated_at=now(),
        status = CASE WHEN status = 'verified' THEN 'entered' ELSE status END, verified_by = NULL
-     WHERE id=$25 RETURNING *`,
+     WHERE id=$26 RETURNING *`,
     [...COLS(d), k.client_id, k.id, JSON.stringify(issues), errs, issues.length - errs, userId, d.id],
   );
 }

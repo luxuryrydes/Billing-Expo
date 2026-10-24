@@ -129,10 +129,22 @@ function Categories({ canEdit }: { canEdit: boolean }) {
   const { run } = useAction();
   return (
     <div className="panel">
-      <table className="t"><tbody>{q.data?.map((c) => <tr key={c.id}><td>{c.name}</td></tr>)}</tbody></table>
-      {canEdit && <div className="row" style={{ marginTop: 8 }}><input placeholder="e.g. Innova Crysta" value={name} onChange={(e) => setName(e.target.value)} /><button className="btn primary" disabled={!name.trim()} onClick={async () => { if (await run(() => api.post('/vehicle-categories', { name }), 'Added')) { setName(''); qc.invalidateQueries({ queryKey: ['vehicle-categories'] }); } }}>Add category</button></div>}
-      <p className="small muted">Category names are matched (case-insensitive) when importing duty sheets.</p>
+      <table className="t"><thead><tr><th>Category</th><th>Names used on duty sheets and bills (aliases)</th><th /></tr></thead>
+        <tbody>{q.data?.map((c: any) => <CategoryRow key={c.id} c={c} canEdit={canEdit} onSaved={() => qc.invalidateQueries({ queryKey: ['vehicle-categories'] })} />)}</tbody></table>
+      {canEdit && <div className="row" style={{ marginTop: 8 }}><input placeholder="e.g. SUV AC" value={name} onChange={(e) => setName(e.target.value)} /><button className="btn primary" disabled={!name.trim()} onClick={async () => { if (await run(() => api.post('/vehicle-categories', { name }), 'Added')) { setName(''); qc.invalidateQueries({ queryKey: ['vehicle-categories'] }); } }}>Add category</button></div>}
+      <p className="small muted">A duty sheet's vehicle type (e.g. "INNOVA") is matched to a category by its name or any alias, ignoring case and spaces.</p>
     </div>
+  );
+}
+
+function CategoryRow({ c, canEdit, onSaved }: { c: any; canEdit: boolean; onSaved: () => void }) {
+  const [aliases, setAliases] = useState((c.aliases ?? []).join(', '));
+  const { run, busy } = useAction();
+  const dirty = aliases !== (c.aliases ?? []).join(', ');
+  return (
+    <tr><td>{c.name}<div className="small muted">{c.description}</div></td>
+      <td><input style={{ width: '100%' }} value={aliases} disabled={!canEdit} onChange={(e) => setAliases(e.target.value)} placeholder="Innova, Ertiga" /></td>
+      <td>{canEdit && dirty && <button className="btn sm primary" disabled={busy} onClick={async () => { if (await run(() => api.put(`/vehicle-categories/${c.id}`, { name: c.name, description: c.description, aliases: aliases.split(',').map((x: string) => x.trim()).filter(Boolean) }), 'Saved')) onSaved(); }}>Save</button>}</td></tr>
   );
 }
 

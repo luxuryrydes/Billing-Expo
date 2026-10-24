@@ -11,6 +11,9 @@ const printer = new PdfPrinter({
   Roboto: { normal: font('Roboto-Regular.ttf'), bold: font('Roboto-Medium.ttf'), italics: font('Roboto-Italic.ttf'), bolditalics: font('Roboto-MediumItalic.ttf') },
 });
 
+/** "Bill No" → "Bill No: "; labels that already end in punctuation ("SAC:-", "DATE :") are kept as written. */
+export const labelSep = (l: string) => (/[:\-.]\s*$/.test(l) ? `${l} ` : `${l}: `);
+
 const PAGE_WIDTH: Record<string, [number, number]> = { A4: [595.28, 841.89], A3: [841.89, 1190.55], LEGAL: [612, 1008] };
 
 export function buildPdfDefinition(m: RenderModel): TDocumentDefinitions {
@@ -70,7 +73,7 @@ export function buildPdfDefinition(m: RenderModel): TDocumentDefinitions {
       margin: [0, 6, 0, 6],
     },
     {
-      table: { widths: ['*', '*'], body: chunk(m.headerFields.map((f) => ({ text: [{ text: `${f.label}: `, bold: true }, f.value], fontSize: fs })), 2) },
+      table: { widths: ['*', '*'], body: chunk(m.headerFields.map((f) => ({ text: [{ text: labelSep(f.label), bold: true }, f.value], fontSize: fs })), 2) },
       layout: 'noBorders',
       margin: [0, 0, 0, 6],
     },

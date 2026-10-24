@@ -22,6 +22,20 @@ export type Column = z.infer<typeof ColumnSchema>;
 
 export const SummarySchema = z.object({ label: z.string(), value: z.string() });
 
+/** Wording of the rows inside a duty block. Tokens: {vehicleShort} {vehicleRegNo} {vehicleModel} {vehicleCategory} {includedKm} {includedHours} {totalKm} {totalHours} {driverName} {fieldOfficer} */
+export const BlockSchema = z.object({
+  header: z.string().default('Duty for ({vehicleShort} {vehicleModel} )'),
+  packageLabel: z.string().default('Upto : {includedKm} kms./{includedHours} hrs duty'),
+  runningLabel: z.string().default('Total running : ( {totalKm} kms./{totalHours} hrs )'),
+  componentLabels: z.record(z.string(), z.string()).default({}),
+  /** Show toll + parking (all reimbursements) as one row */
+  mergeReimbursements: z.boolean().default(true),
+  reimbursementLabel: z.string().default('Toll Tax & Parking'),
+  vehicleShortDigits: z.number().int().min(0).max(10).default(4),
+  blankRowBetween: z.boolean().default(true),
+  showPackageUnit: z.boolean().default(false),
+});
+
 export const LayoutSchema = z.object({
   page: z.object({
     size: z.enum(['A4', 'A3', 'LEGAL']).default('A4'),
@@ -39,7 +53,15 @@ export const LayoutSchema = z.object({
     { label: 'Period', value: '{periodLabel}' },
   ]),
   periodLabel: z.string().default('{periodStart} to {periodEnd}'),
-  rowMode: z.enum(['duty', 'line']).default('duty'),
+  /** duty = one row per duty; line = one row per charge; block = a heading row per duty followed by one row per charge (e.g. DRI format) */
+  rowMode: z.enum(['duty', 'line', 'block']).default('duty'),
+  block: BlockSchema.default(BlockSchema.parse({})),
+  dateFormat: z.enum(['dd-mm-yyyy', 'dd.mm.yyyy', 'dd/mm/yyyy']).default('dd-mm-yyyy'),
+  /** indian = 1,23,456.00; plain = 123456.00 */
+  numberStyle: z.enum(['indian', 'plain']).default('indian'),
+  /** Label for each tax line when a summary row uses "taxLines". Tokens: {name} {taxType} {rate} {base} */
+  taxLabel: z.string().default('{name} @ {rate}% on {base}'),
+  clientBlockStyle: z.enum(['bill_to', 'name_address_gstin']).default('bill_to'),
   sortBy: z.enum(['date', 'vehicle']).default('date'),
   groupBy: z.enum(['none', 'vehicle', 'date']).default('none'),
   columns: z.array(ColumnSchema).min(1),
@@ -88,6 +110,10 @@ export const DUTY_COLUMN_KEYS: Record<string, string> = {
   dutyTotal: 'Duty total',
   remarks: 'Remarks',
 };
+export const BLOCK_COLUMN_KEYS: Record<string, string> = {
+  sno: 'Serial number (on the duty heading row)', dutyDate: 'Duty date (heading row)', description: 'Description (heading, package, running, charges)',
+  unit: 'Quantity / unit', rate: 'Rate', amount: 'Amount', taxable: 'Taxable amount', nonTaxable: 'Non-taxable amount',
+};
 export const LINE_COLUMN_KEYS: Record<string, string> = {
   sno: 'Serial number', dutyDate: 'Duty date', vehicleRegNo: 'Vehicle number', label: 'Description', quantity: 'Quantity', unit: 'Unit', rate: 'Rate', amount: 'Amount', taxCategory: 'Taxable / non-taxable',
 };
@@ -96,13 +122,15 @@ export interface RenderDuty extends DutyInput {
   driverName?: string | null;
   fieldOfficer?: string | null;
   remarks?: string | null;
+  /** Vehicle type as written on the duty slip, e.g. "Innova" */
+  vehicleModel?: string | null;
 }
 
 export interface BillContext {
   bill: { billNo: string; billDate: string; periodStart: string; periodEnd: string; revisionNo: number };
   client: { name: string; billing_address: string; gstin: string | null; pan: string | null; state_name: string | null; state_code: string | null };
   supplier: { name: string; address: string; gstin: string | null; pan: string | null; state_name: string | null; state_code: string | null; phone: string | null; email: string | null; bank_details: string | null } | null;
-  contract: { title: string; reference_no: string; po_number: string | null };
+  contract: { title: string; reference_no: string; po_number: string | null; sac_code?: string | null };
   duties: RenderDuty[];
   output: BillCalcOutput;
 }
@@ -123,6 +151,7 @@ export interface RenderModel {
   grandTotal: string;
   dataRowCount: number;
   page: Layout['page'];
+  numberStyle: Layout['numberStyle'];
 }
 
 // --- formatting ---------------------------------------------------------------
@@ -137,11 +166,21 @@ export function inr(v: string | Dec): string {
   return `${neg ? '-' : ''}${rest ? rest + ',' : ''}${last3}.${f}`;
 }
 
-export function fmtDate(iso: string | null | undefined): string {
+export function fmtDate(iso: string | null | undefined, style: Layout['dateFormat'] = 'dd-mm-yyyy'): string {
   if (!iso) return '';
   const [y, m, d] = iso.slice(0, 10).split('-');
-  return `${d}-${m}-${y}`;
+  const sep = style === 'dd.mm.yyyy' ? '.' : style === 'dd/mm/yyyy' ? '/' : '-';
+  return `${d}${sep}${m}${sep}${y}`;
 }
+
+interface Fmt { date: (s: string) => string; money: (s: string) => string }
+const fmtFor = (l: Pick<Layout, 'dateFormat' | 'numberStyle'>): Fmt => ({
+  date: (s) => fmtDate(s, l.dateFormat),
+  money: (s) => (l.numberStyle === 'plain' ? dec(s).toFixed(2) : inr(s)),
+});
+const DEFAULT_FMT = fmtFor({ dateFormat: 'dd-mm-yyyy', numberStyle: 'indian' });
+/** 80.0 → "80", 11.50 → "11.5" */
+const plainNum = (s: string | undefined) => (s && /^-?\d+(\.\d+)?$/.test(s) ? dec(s).toString() : s ?? '');
 
 const ONES = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
 const TENS = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
@@ -176,14 +215,15 @@ export function amountInWords(v: string): string {
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-export function placeholders(ctx: BillContext): Record<string, string> {
+export function placeholders(ctx: BillContext, fmt: Fmt = DEFAULT_FMT): Record<string, string> {
   const t = ctx.output.totals;
   const [y, m] = ctx.bill.periodStart.split('-');
+  const inr = fmt.money;
   const p: Record<string, string> = {
     billNo: ctx.bill.billNo + (ctx.bill.revisionNo ? ` (Rev. ${ctx.bill.revisionNo})` : ''),
-    billDate: fmtDate(ctx.bill.billDate),
-    periodStart: fmtDate(ctx.bill.periodStart),
-    periodEnd: fmtDate(ctx.bill.periodEnd),
+    billDate: fmt.date(ctx.bill.billDate),
+    periodStart: fmt.date(ctx.bill.periodStart),
+    periodEnd: fmt.date(ctx.bill.periodEnd),
     monthName: MONTHS[Number(m) - 1],
     year: y,
     clientName: ctx.client.name,
@@ -204,6 +244,7 @@ export function placeholders(ctx: BillContext): Record<string, string> {
     contractRef: ctx.contract.reference_no,
     contractTitle: ctx.contract.title,
     poNumber: ctx.contract.po_number ?? '',
+    sac: ctx.contract.sac_code ?? '',
     dutyCount: String(ctx.duties.length),
     taxableValue: inr(t.taxableValue),
     nonTaxableTotal: inr(t.nonTaxableTotal),
@@ -216,19 +257,26 @@ export function placeholders(ctx: BillContext): Record<string, string> {
   return p;
 }
 
+/** Address lines often repeat the department name; drop it when it is the leading part. */
+function stripLeading(address: string, name: string): string {
+  const a = address.trim();
+  return a.toLowerCase().startsWith(name.toLowerCase()) ? a.slice(name.length).replace(/^[\s,]+/, '') : a;
+}
+
 export function fill(tpl: string, p: Record<string, string>): string {
   return tpl.replace(/\{(\w+)\}/g, (m, k) => (k in p ? p[k] : m));
 }
 
-function cellFor(col: Column, v: string | null | undefined): Cell {
+function cellFor(col: Column, v: string | null | undefined, fmt: Fmt = DEFAULT_FMT): Cell {
   const raw = v ?? '';
   let out = raw;
+  const isNum = /^-?\d+(\.\d+)?$/.test(raw);
   if (raw !== '') {
-    if (col.format === 'money') out = inr(raw);
-    else if (col.format === 'date') out = fmtDate(raw);
-    else if (col.format === 'datetime') out = `${fmtDate(raw.slice(0, 10))} ${raw.slice(11, 16)}`;
+    if (col.format === 'money' && isNum) out = fmt.money(raw);
+    else if (col.format === 'date') out = fmt.date(raw);
+    else if (col.format === 'datetime') out = `${fmt.date(raw.slice(0, 10))} ${raw.slice(11, 16)}`;
     else if (col.format === 'time') out = raw.length > 5 ? raw.slice(11, 16) : raw;
-    else if (col.format === 'hours' || col.format === 'km' || col.format === 'number') out = dec(raw).toDecimalPlaces(2).toString();
+    else if ((col.format === 'hours' || col.format === 'km' || col.format === 'number') && isNum) out = dec(raw).toDecimalPlaces(2).toString();
   }
   const numeric = ['money', 'number', 'km', 'hours'].includes(col.format);
   return { v: out, raw, fmt: col.format, align: col.align ?? (numeric ? 'right' : col.format === 'text' ? 'left' : 'center') };
@@ -282,7 +330,9 @@ function dutyValue(key: string, d: RenderDuty, vars: Record<string, string>, lin
 
 export function buildRenderModel(ctx: BillContext, layoutRaw: unknown): RenderModel {
   const layout = LayoutSchema.parse(layoutRaw);
-  const p = placeholders(ctx);
+  const fmt = fmtFor(layout);
+  const inr = fmt.money;
+  const p = placeholders(ctx, fmt);
   p.periodLabel = fill(layout.periodLabel, p);
   const out = ctx.output;
   const varsById = new Map(out.duties.map((d) => [d.dutyId, d.variables]));
@@ -303,19 +353,65 @@ export function buildRenderModel(ctx: BillContext, layoutRaw: unknown): RenderMo
     if (layout.groupBy === 'none' || groupKey === null) return;
     rows.push({
       kind: 'subtotal',
-      cells: layout.columns.map((c, i) => (i === 0 ? { v: `Subtotal ${label}`, raw: '', fmt: 'text', align: 'left' } : c.total ? cellFor(c, group[i].toFixed(2)) : { v: '', raw: '', fmt: 'text', align: 'left' })),
+      cells: layout.columns.map((c, i) => (i === 0 ? { v: `Subtotal ${label}`, raw: '', fmt: 'text', align: 'left' } : c.total ? cellFor(c, group[i].toFixed(2), fmt) : { v: '', raw: '', fmt: 'text', align: 'left' })),
     });
     group.forEach((_, i) => (group[i] = new D(0)));
   };
   let sno = 0;
   const addRow = (vals: (string | null)[]) => {
-    rows.push({ kind: 'data', cells: layout.columns.map((c, i) => cellFor(c, vals[i])) });
+    rows.push({ kind: 'data', cells: layout.columns.map((c, i) => cellFor(c, vals[i], fmt)) });
     layout.columns.forEach((c, i) => {
       if (c.total && vals[i] && /^-?\d+(\.\d+)?$/.test(vals[i]!)) { totals[i] = totals[i].add(dec(vals[i]!)); group[i] = group[i].add(dec(vals[i]!)); }
     });
   };
 
-  if (layout.rowMode === 'duty') {
+  if (layout.rowMode === 'block') {
+    const b = layout.block;
+    const keyed = (vals: Record<string, string | null | undefined>) => addRow(layout.columns.map((c) => vals[c.key] ?? null));
+    const amountCols = (l: { taxCategory: string; amount: string }) => ({
+      amount: l.amount,
+      taxable: l.taxCategory === 'taxable' ? l.amount : null,
+      nonTaxable: l.taxCategory === 'non_taxable' ? l.amount : null,
+    });
+    for (const d of duties) {
+      sno++;
+      const vars = varsById.get(d.id) ?? {};
+      const lines = linesByDuty.get(d.id) ?? [];
+      const reg = d.vehicleRegNo;
+      const tok: Record<string, string> = {
+        ...p,
+        vehicleRegNo: reg,
+        vehicleShort: b.vehicleShortDigits && reg.length > b.vehicleShortDigits ? reg.slice(-b.vehicleShortDigits) : reg,
+        vehicleModel: d.vehicleModel || d.vehicleCategoryName || '',
+        vehicleCategory: d.vehicleCategoryName ?? '',
+        includedKm: plainNum(vars.included_km),
+        includedHours: plainNum(vars.included_hours),
+        totalKm: plainNum(vars.billable_km),
+        totalHours: plainNum(vars.billable_hours),
+        driverName: d.driverName ?? '',
+        fieldOfficer: d.fieldOfficer ?? '',
+        dutyDate: fmt.date(d.dutyDate),
+      };
+      keyed({ sno: String(sno), dutyDate: d.dutyDate, description: fill(b.header, tok) });
+      for (const l of lines.filter((x) => x.componentCode === 'BASE')) {
+        keyed({ description: fill(b.packageLabel, tok), unit: b.showPackageUnit ? plainNum(l.quantity) : null, rate: plainNum(l.rate), ...amountCols(l) });
+      }
+      if (b.runningLabel) keyed({ description: fill(b.runningLabel, tok) });
+      for (const l of lines.filter((x) => x.componentCode !== 'BASE' && !(b.mergeReimbursements && x.kind === 'reimbursement'))) {
+        keyed({ description: b.componentLabels[l.componentCode] ?? l.label, unit: plainNum(l.quantity), rate: plainNum(l.rate), ...amountCols(l) });
+      }
+      const reimb = lines.filter((x) => b.mergeReimbursements && x.kind === 'reimbursement');
+      if (reimb.length) {
+        const sum = reimb.reduce((a, l) => a.add(dec(l.amount)), new D(0)).toFixed(2);
+        keyed({ description: b.reimbursementLabel, ...amountCols({ taxCategory: reimb[0].taxCategory, amount: sum }) });
+      }
+      if (b.blankRowBetween) keyed({});
+    }
+    for (const l of out.lines.filter((x) => x.scope !== 'duty')) {
+      sno++;
+      keyed({ sno: String(sno), description: `${l.label}${l.vehicleRegNo ? ` (${l.vehicleRegNo})` : ''}`, unit: plainNum(l.quantity), rate: plainNum(l.rate), ...amountCols(l) });
+    }
+  } else if (layout.rowMode === 'duty') {
     for (const d of duties) {
       const gk = layout.groupBy === 'vehicle' ? d.vehicleRegNo : layout.groupBy === 'date' ? d.dutyDate : null;
       if (gk !== groupKey) { flushGroup(groupKey ?? ''); groupKey = gk; }
@@ -362,14 +458,14 @@ export function buildRenderModel(ctx: BillContext, layoutRaw: unknown): RenderMo
   }
   const dataRowCount = rows.filter((r) => r.kind === 'data').length;
   if (layout.columns.some((c) => c.total)) {
-    rows.push({ kind: 'total', cells: layout.columns.map((c, i) => (i === 0 ? { v: 'TOTAL', raw: '', fmt: 'text', align: 'left' } : c.total ? cellFor(c, totals[i].toFixed(2)) : { v: '', raw: '', fmt: 'text', align: 'left' })) });
+    rows.push({ kind: 'total', cells: layout.columns.map((c, i) => (i === 0 ? { v: 'TOTAL', raw: '', fmt: 'text', align: 'left' } : c.total ? cellFor(c, totals[i].toFixed(2), fmt) : { v: '', raw: '', fmt: 'text', align: 'left' })) });
   }
 
   const t = out.totals as unknown as Record<string, string>;
   const summary: RenderModel['summary'] = [];
   for (const s of layout.summary) {
     if (s.value === 'taxLines') {
-      for (const tl of out.taxLines) summary.push({ label: `${tl.name} @ ${tl.rate}% on ${inr(tl.taxableBase)}`, value: inr(tl.amount) });
+      for (const tl of out.taxLines) summary.push({ label: fill(layout.taxLabel, { name: tl.name, taxType: tl.taxType, rate: plainNum(tl.rate), base: inr(tl.taxableBase) }), value: inr(tl.amount) });
     } else if (s.value.startsWith('tax:')) {
       const tl = out.taxLines.find((x) => x.taxType === s.value.slice(4));
       if (tl) summary.push({ label: fill(s.label, { ...p, rate: tl.rate }), value: inr(tl.amount) });
@@ -385,7 +481,9 @@ export function buildRenderModel(ctx: BillContext, layoutRaw: unknown): RenderMo
   return {
     title: fill(layout.title, p),
     supplierBlock: layout.showSupplier && sup ? [sup.name, sup.address, sup.gstin ? `GSTIN: ${sup.gstin}` : '', sup.pan ? `PAN: ${sup.pan}` : '', sup.state_name ? `State: ${sup.state_name}${sup.state_code ? ` (${sup.state_code})` : ''}` : '', [sup.phone, sup.email].filter(Boolean).join(' · ')].filter(Boolean) : [],
-    clientBlock: layout.showClient ? ['Bill to:', ctx.client.name, ctx.client.billing_address, ctx.client.gstin ? `GSTIN: ${ctx.client.gstin}` : '', ctx.client.state_name ? `State: ${ctx.client.state_name}${ctx.client.state_code ? ` (${ctx.client.state_code})` : ''}` : ''].filter(Boolean) : [],
+    clientBlock: !layout.showClient ? [] : layout.clientBlockStyle === 'name_address_gstin'
+      ? [ctx.client.name, stripLeading(ctx.client.billing_address, ctx.client.name), ctx.client.gstin ? `Client GSTIN: ${ctx.client.gstin}` : ''].filter(Boolean)
+      : ['Bill to:', ctx.client.name, ctx.client.billing_address, ctx.client.gstin ? `GSTIN: ${ctx.client.gstin}` : '', ctx.client.state_name ? `State: ${ctx.client.state_name}${ctx.client.state_code ? ` (${ctx.client.state_code})` : ''}` : ''].filter(Boolean),
     headerFields: layout.headerFields.map((h) => ({ label: h.label, value: fill(h.value, p) })),
     columns: layout.columns,
     rows,
@@ -397,6 +495,7 @@ export function buildRenderModel(ctx: BillContext, layoutRaw: unknown): RenderMo
     grandTotal: out.totals.grandTotal,
     dataRowCount,
     page: layout.page,
+    numberStyle: layout.numberStyle,
   };
 }
 

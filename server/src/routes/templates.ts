@@ -4,10 +4,12 @@ import { z } from 'zod';
 import { audit } from '../lib/audit.js';
 import { perm } from '../lib/auth.js';
 import { badRequest, conflict, forbidden, notFound, optText, parse, uuid } from '../lib/http.js';
-import { checkUpload, loadFile, saveFile } from '../lib/storage.js';
+import { checkUpload, filePath, loadFile, saveFile } from '../lib/storage.js';
+import { runWorker } from '../services/extraction.js';
+import { learnFromPdf, learnFromXlsx, type LearnedTemplate } from '../services/sampleTemplate.js';
 import { calculateBill } from '../engine/bill.js';
 import { RateConfigSchema, type DutyInput } from '../engine/types.js';
-import { buildRenderModel, defaultDutyLayout, DUTY_COLUMN_KEYS, LayoutSchema, LINE_COLUMN_KEYS, placeholders, type BillContext } from '../services/render.js';
+import { BLOCK_COLUMN_KEYS, buildRenderModel, defaultDutyLayout, DUTY_COLUMN_KEYS, LayoutSchema, LINE_COLUMN_KEYS, placeholders, type BillContext } from '../services/render.js';
 import { renderLayoutXlsx, renderMappedXlsx, XlsxMappingSchema } from '../services/excel.js';
 import { renderPdf } from '../services/pdf.js';
 import { getSetting } from './master.js';
@@ -61,7 +63,7 @@ export function previewContext(): BillContext {
 export async function templateRoutes(app: FastifyInstance) {
   const db = app.db;
 
-  app.get('/templates/columns', { preHandler: perm('view') }, async () => ({ duty: DUTY_COLUMN_KEYS, line: LINE_COLUMN_KEYS, defaultLayout: defaultDutyLayout() }));
+  app.get('/templates/columns', { preHandler: perm('view') }, async () => ({ duty: DUTY_COLUMN_KEYS, line: LINE_COLUMN_KEYS, block: BLOCK_COLUMN_KEYS, defaultLayout: defaultDutyLayout() }));
 
   app.get('/templates', { preHandler: perm('view') }, async (req) => {
     const q = req.query as { clientId?: string; contractId?: string };
@@ -83,6 +85,57 @@ export async function templateRoutes(app: FastifyInstance) {
     });
     await audit(db, req.user!.id, 'template', row!.id, 'create', undefined, b);
     return row;
+  });
+
+  /**
+   * Import a sample bill / invoice format (PDF or Excel) for a department. Creates a DRAFT template
+   * version learned from it — a new template, or a new version of an existing one (template_id).
+   */
+  app.post('/templates/from-sample', { preHandler: perm('template.write') }, async (req, reply) => {
+    const file = await req.file();
+    if (!file) throw badRequest('Choose the sample bill (PDF or Excel)');
+    const buf = await file.toBuffer();
+    const ext = checkUpload(file.filename, buf, ['.pdf', '.xlsx', '.png', '.jpg', '.jpeg']);
+    const f = Object.fromEntries(Object.entries(file.fields).map(([k, v]) => [k, (v as { value?: string })?.value || undefined]));
+    const meta = parse(z.object({ client_id: uuid, contract_id: uuid.optional(), template_id: uuid.optional(), name: z.string().trim().min(1).optional(), as_new: z.enum(['true', 'false']).optional() }), f);
+    const client = await db.one<{ name: string; short_code: string }>('SELECT name, short_code FROM clients WHERE id = $1', [meta.client_id]);
+    if (!client) throw notFound('Department');
+    if (meta.contract_id) {
+      const k = await db.one<{ client_id: string }>('SELECT client_id FROM contracts WHERE id = $1', [meta.contract_id]);
+      if (!k || k.client_id !== meta.client_id) throw badRequest('The contract does not belong to this department');
+    }
+    const name = meta.name ?? `${client.short_code} bill format`;
+    if (meta.template_id) {
+      const t = await db.one<{ client_id: string }>('SELECT client_id FROM billing_templates WHERE id = $1', [meta.template_id]);
+      if (!t || t.client_id !== meta.client_id) throw badRequest('That template belongs to a different department');
+    } else if (meta.as_new !== 'true') {
+      const same = await db.one<{ id: string; name: string }>('SELECT id, name FROM billing_templates WHERE client_id = $1 AND lower(name) = lower($2)', [meta.client_id, name]);
+      if (same) return reply.status(409).send({ error: `"${same.name}" already exists for this department. Add the sample as a new version of it, or save it under another name.`, existingTemplateId: same.id });
+    }
+    const stored = await saveFile(db, file.filename, buf, req.user!.id);
+    const sup = await db.one<{ name: string }>(meta.contract_id
+      ? 'SELECT s.name FROM contracts k JOIN supplier_profiles s ON s.id = k.supplier_profile_id WHERE k.id = $1'
+      : 'SELECT name FROM supplier_profiles WHERE is_default AND $1::uuid IS NULL', [meta.contract_id ?? null]);
+    let learned: LearnedTemplate;
+    try {
+      if (ext === '.pdf') learned = learnFromPdf((await runWorker(filePath(stored))).pages, sup?.name ?? '', stored.original_name);
+      else if (ext === '.xlsx') learned = await learnFromXlsx(buf, stored.original_name);
+      else learned = { layout: defaultDutyLayout(), xlsxMapping: null, unmatched: [], notes: ['Images are kept as the visual reference only; design the layout in the template designer.'] };
+    } catch (e) {
+      throw badRequest(`Could not read the sample: ${(e as Error).message}`);
+    }
+    const out = await db.tx(async (t) => {
+      const templateId = meta.template_id ?? (await t.one<{ id: string }>('INSERT INTO billing_templates(client_id, contract_id, name, description) VALUES ($1,$2,$3,$4) RETURNING id',
+        [meta.client_id, meta.contract_id ?? null, name, `Learned from ${stored.original_name}`]))!.id;
+      const v = await t.one<{ id: string; version_no: number }>(
+        `INSERT INTO billing_template_versions(template_id, version_no, layout, xlsx_file_id, xlsx_mapping, reference_file_id, notes, created_by)
+         VALUES ($1, (SELECT COALESCE(max(version_no),0)+1 FROM billing_template_versions WHERE template_id = $1), $2, $3, $4, $5, $6, $7) RETURNING id, version_no`,
+        [templateId, learned.layout, ext === '.xlsx' ? stored.id : null, learned.xlsxMapping, stored.id, learned.notes.join(' '), req.user!.id],
+      );
+      await audit(t, req.user!.id, 'template_version', v!.id, 'import_sample', undefined, { file: stored.original_name, template: templateId });
+      return { templateId, versionId: v!.id, versionNo: v!.version_no };
+    });
+    return { ...out, notes: learned.notes, unmatched: learned.unmatched };
   });
 
   app.get('/template-versions/:id', { preHandler: perm('view') }, async (req) => {

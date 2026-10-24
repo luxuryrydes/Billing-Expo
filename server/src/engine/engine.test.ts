@@ -268,9 +268,15 @@ describe('duty validation', () => {
     const codes = validateDuty({ ...base, endKm: '90', endAt: '2025-09-10 19:00', vehicleCategoryId: null }, DEFAULT_VALIDATION).map((i) => i.code);
     expect(codes).toEqual(expect.arrayContaining(['ODOMETER_REVERSED', 'TIME_REVERSED', 'MISSING_FIELD']));
   });
-  it('warns on implausible distance and duration', () => {
+  it('warns on high distance and duration, and errors on impossible distance', () => {
     const codes = validateDuty({ ...base, endKm: '2000', endAt: '2025-09-12 01:00' }, DEFAULT_VALIDATION).map((i) => i.code);
     expect(codes).toEqual(expect.arrayContaining(['HIGH_KM', 'LONG_DURATION']));
+    // Real case from a DRI duty sheet: a mistyped closing reading gave 2,28,127 km
+    const typo = validateDuty({ ...base, startKm: '100', endKm: '228227' }, DEFAULT_VALIDATION);
+    expect(typo.find((i) => i.code === 'IMPLAUSIBLE_KM')?.severity).toBe('error');
+  });
+  it('rejects vehicle numbers without digits', () => {
+    expect(validateDuty({ ...base, vehicleRegNo: 'New' }, DEFAULT_VALIDATION).map((i) => i.code)).toContain('INVALID_VEHICLE_NO');
   });
   it('detects duplicates and overlaps for the same vehicle', () => {
     const other = { id: 'x', dutyDate: '2025-09-10', startAt: '2025-09-10 20:00', endAt: '2025-09-11 01:00', startKm: '100', endKm: '150' };

@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs';
 import { z } from 'zod';
 import { dec } from '../engine/decimal.js';
 import { fill, type Cell, type RenderModel } from './render.js';
+import { labelSep } from './pdf.js';
 
 /** Indian-grouped number format (handles lakh / crore separators). */
 export const INR_FMT = '[>=10000000]##\\,##\\,##\\,##0.00;[>=100000]##\\,##\\,##0.00;##,##0.00';
@@ -9,11 +10,11 @@ export const INR_FMT = '[>=10000000]##\\,##\\,##\\,##0.00;[>=100000]##\\,##\\,##
 const thin = { style: 'thin' as const, color: { argb: 'FF555555' } };
 const BORDER = { top: thin, left: thin, bottom: thin, right: thin };
 
-function setCell(c: ExcelJS.Cell, cell: Cell) {
+function setCell(c: ExcelJS.Cell, cell: Cell, plain = false) {
   const numeric = ['money', 'number', 'km', 'hours'].includes(cell.fmt) && /^-?\d+(\.\d+)?$/.test(cell.raw);
   if (numeric) {
     c.value = dec(cell.raw).toNumber(); // values are already rounded to 2dp by the engine
-    c.numFmt = cell.fmt === 'money' ? INR_FMT : '0.##';
+    c.numFmt = cell.fmt === 'money' ? (plain ? '0.00' : INR_FMT) : '0.##';
   } else if (cell.fmt === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(cell.raw)) {
     const [y, m, d] = cell.raw.split('-').map(Number);
     c.value = new Date(Date.UTC(y, m - 1, d));
@@ -58,7 +59,7 @@ export async function renderLayoutXlsx(m: RenderModel): Promise<Buffer> {
   }
   r++;
   for (const h of m.headerFields) {
-    merged(r, `${h.label}: ${h.value}`, { font: { size: 9 } }, 1, n);
+    merged(r, `${labelSep(h.label)}${h.value}`, { font: { size: 9 } }, 1, n);
     r++;
   }
   r++;
@@ -105,7 +106,7 @@ export async function renderLayoutXlsx(m: RenderModel): Promise<Buffer> {
     }
     row.cells.forEach((cell, i) => {
       const c = ws.getCell(r, i + 1);
-      if (i === 0 || i >= span) setCell(c, cell);
+      if (i === 0 || i >= span) setCell(c, cell, m.numberStyle === 'plain');
       c.border = BORDER;
       c.font = { size: 9, bold: row.kind !== 'data' };
     });
@@ -122,7 +123,7 @@ export async function renderLayoutXlsx(m: RenderModel): Promise<Buffer> {
     ws.mergeCells(r, n - 1, r, n);
     const v = ws.getCell(r, n - 1);
     const raw = s.value.replace(/,/g, '');
-    if (/^-?\d+(\.\d+)?$/.test(raw)) { v.value = Number(raw); v.numFmt = INR_FMT; } else v.value = s.value;
+    if (/^-?\d+(\.\d+)?$/.test(raw)) { v.value = Number(raw); v.numFmt = m.numberStyle === 'plain' ? '0.00' : INR_FMT; } else v.value = s.value;
     v.alignment = { horizontal: 'right' };
     v.font = { bold: !!s.strong, size: 10 };
     v.border = BORDER;
@@ -200,7 +201,7 @@ export async function renderMappedXlsx(templateBuf: Buffer, mapping: XlsxMapping
       const c = r.getCell(col);
       if (!cell) { c.value = null; continue; }
       const keepFmt = c.numFmt;
-      setCell(c, cell);
+      setCell(c, cell, m.numberStyle === 'plain');
       if (keepFmt && keepFmt !== 'General' && cell.fmt !== 'text') c.numFmt = keepFmt;
       if (row.kind !== 'data') c.font = { ...(c.font ?? {}), bold: true };
     }

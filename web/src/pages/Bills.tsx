@@ -1,44 +1,11 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { api, fileUrl, qs } from '../api';
+import { api, downloadBlob, fileUrl, qs } from '../api';
 import { useAuth } from '../auth';
 import { Confirm, ErrorBox, Field, Loading, Modal, PageHead, Status, Tabs, useAction } from '../components/ui';
-import { d, dt, inr, monthRange, STATUS_LABEL, thisMonth } from '../format';
+import { d, dt, inr, monthRange, thisMonth } from '../format';
 import { useClients, useContracts } from '../lookups';
-
-export function BillsPage() {
-  const [sp, setSp] = useSearchParams();
-  const clients = useClients();
-  const f = { clientId: sp.get('clientId') ?? '', status: sp.get('status') ?? '' };
-  const q = useQuery({ queryKey: ['bills', f], queryFn: () => api.get<any[]>(`/bills${qs(f)}`) });
-  const set = (k: string, v: string) => { const n = new URLSearchParams(sp); if (v) n.set(k, v); else n.delete(k); setSp(n); };
-  return (
-    <>
-      <PageHead title="Monthly Bills" sub="Every bill with its status, revisions and files.">
-        <select value={f.clientId} onChange={(e) => set('clientId', e.target.value)}><option value="">All departments</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
-        <select value={f.status} onChange={(e) => set('status', e.target.value)}><option value="">Any status</option>{['draft', 'calculation_pending', 'validation_required', 'under_review', 'approved', 'generated', 'submitted', 'superseded', 'cancelled'].map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select>
-        <Link className="btn primary" to="/billing">New bill</Link>
-      </PageHead>
-      <ErrorBox error={q.error} />
-      <div className="panel tight">
-        {q.isLoading ? <Loading /> : (
-          <table className="t">
-            <thead><tr><th>Bill no.</th><th>Department</th><th>Contract</th><th>Period</th><th className="num">Duties</th><th className="num">Taxable</th><th className="num">Tax</th><th className="num">Total</th><th>Status</th><th className="num">Open exceptions</th></tr></thead>
-            <tbody>
-              {q.data?.map((b) => (
-                <tr key={b.id}><td><Link to={`/billing/${b.id}`}>{b.bill_no ?? 'Draft'}</Link>{b.revision_no > 0 && <span className="badge brand">Rev {b.revision_no}</span>}</td><td>{b.client_name}</td><td>{b.contract_ref}</td>
-                  <td className="nowrap">{d(b.period_start)} – {d(b.period_end)}</td><td className="num">{b.duty_count}</td><td className="num">{inr(b.taxable_value)}</td><td className="num">{inr(b.tax_total)}</td><td className="num"><b>{inr(b.grand_total)}</b></td>
-                  <td><Status s={b.status} /></td><td className="num">{b.open_exceptions ? <span className="badge err">{b.open_exceptions}</span> : ''}</td></tr>
-              ))}
-              {q.data?.length === 0 && <tr><td colSpan={10} className="empty">No bills.</td></tr>}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </>
-  );
-}
 
 const STEPS = ['Select', 'Check duties', 'Calculate', 'Resolve exceptions', 'Review & approve', 'Generate files', 'Submit'];
 function stepOf(b: any): number {
@@ -64,13 +31,23 @@ function NewBill() {
   const contracts = useContracts(clientId || undefined);
   const [contractId, setContractId] = useState(sp.get('contract') ?? '');
   const [month, setMonth] = useState(thisMonth(-1));
-  const [custom, setCustom] = useState(false);
+  const [kind, setKind] = useState<'month' | 'date' | 'range'>('month');
+  const [date, setDate] = useState(monthRange(thisMonth(-1)).to);
   const [range, setRange] = useState(monthRange(thisMonth(-1)));
   const [billDate, setBillDate] = useState('');
   const { run, busy } = useAction();
+  const contract = contracts.data?.find((k) => k.id === contractId);
   const create = async () => {
-    const r = await run(() => api.post('/bills', { contract_id: contractId, period_start: custom ? range.from : monthRange(month).from, period_end: custom ? range.to : monthRange(month).to, bill_date: billDate || undefined }), 'Bill created');
+    const period = kind === 'month' ? monthRange(month) : kind === 'date' ? { from: date, to: date } : range;
+    const r = await run(() => api.post('/bills', { contract_id: contractId, period_start: period.from, period_end: period.to, period_type: kind, bill_date: billDate || undefined }), 'Bill created');
     if (r) nav(`/billing/${r.id}`);
+  };
+  const dateWise = async () => {
+    const r = await run(() => api.post('/bills/date-wise', { contract_id: contractId, month, bill_date: billDate || undefined }));
+    if (r) {
+      alert(`${r.created.length} date-wise draft bill(s) created${r.skipped.length ? `; ${r.skipped.length} date(s) skipped (already billed)` : ''}. They are listed under Billing Export / Invoices.`);
+      nav('/bills');
+    }
   };
   return (
     <>
@@ -81,14 +58,24 @@ function NewBill() {
           <Field label="Department"><select value={clientId} onChange={(e) => setClientId(e.target.value)}><option value="">All</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
           <Field label="Contract" required><select value={contractId} onChange={(e) => setContractId(e.target.value)}><option value="">Select…</option>{contracts.data?.map((k) => <option key={k.id} value={k.id}>{k.client_name} — {k.reference_no}</option>)}</select></Field>
         </div>
+        <div className="row">
+          <label className="check"><input type="radio" checked={kind === 'month'} onChange={() => setKind('month')} />Month-wise bill</label>
+          <label className="check"><input type="radio" checked={kind === 'date'} onChange={() => setKind('date')} />Date-wise bill (one date)</label>
+          <label className="check"><input type="radio" checked={kind === 'range'} onChange={() => setKind('range')} />Other period</label>
+          {contract && <span className="small muted">Contract billing: {contract.billing_frequency === 'daily' ? 'date-wise' : contract.billing_frequency}</span>}
+        </div>
         <div className="grid g3">
-          {!custom ? <Field label="Billing month" required><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} /></Field> : <>
+          {kind === 'month' && <Field label="Billing month" required><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} /></Field>}
+          {kind === 'date' && <Field label="Duty date" required><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>}
+          {kind === 'range' && <>
             <Field label="From" required><input type="date" value={range.from} onChange={(e) => setRange({ ...range, from: e.target.value })} /></Field>
             <Field label="To" required><input type="date" value={range.to} onChange={(e) => setRange({ ...range, to: e.target.value })} /></Field></>}
           <Field label="Bill date" hint="Default: day after period end"><input type="date" value={billDate} onChange={(e) => setBillDate(e.target.value)} /></Field>
         </div>
-        <label className="check"><input type="checkbox" checked={custom} onChange={(e) => setCustom(e.target.checked)} />Custom period (fortnightly, part month)</label>
-        <div className="row end"><button className="btn primary" disabled={!contractId || busy} onClick={create}>Create bill & check duties</button></div>
+        <div className="row end">
+          {kind === 'month' && <button className="btn" disabled={!contractId || busy} onClick={dateWise} title="One draft bill per duty date in the month">Create date-wise bills for the month</button>}
+          <button className="btn primary" disabled={!contractId || busy} onClick={create}>Create bill & check duties</button>
+        </div>
       </div>
     </>
   );
@@ -130,6 +117,10 @@ function BillWorkspace({ id }: { id: string }) {
         {b.status === 'under_review' && can('bill.approve') && <button className="btn ok" disabled={busy} onClick={() => setConfirm({ text: `Approve this bill for ${inr(b.grand_total)}? The calculation, rates and template version will be frozen and a bill number assigned.`, label: 'Approve', fn: (note) => api.post(`/bills/${id}/approve`, { note }) })}>Approve</button>}
         {b.status === 'under_review' && can('bill.review') && <button className="btn danger" onClick={() => setConfirm({ text: 'Send the bill back for correction?', reason: 'Reason', label: 'Send back', danger: true, fn: (note) => api.post(`/bills/${id}/reject`, { note }) })}>Send back</button>}
         {['approved', 'generated', 'submitted'].includes(b.status) && can('export') && <button className="btn primary" disabled={busy} onClick={() => act(() => api.post(`/bills/${id}/generate`), 'Files generated')}>{b.files.length ? 'Regenerate files' : 'Generate Excel & PDF'}</button>}
+        {editable && b.current_snapshot_id && b.template_version_id && <>
+          <button className="btn" disabled={busy} title="Draft preview in the department's format (marked as preview)" onClick={async () => { const blob = await run(() => api.blob('POST', `/template-versions/${b.template_version_id}/preview`, { format: 'pdf', billId: id })); if (blob) window.open(URL.createObjectURL(blob), '_blank'); }}>Preview PDF</button>
+          <button className="btn" disabled={busy} onClick={async () => { const blob = await run(() => api.blob('POST', `/template-versions/${b.template_version_id}/preview`, { format: 'xlsx', billId: id })); if (blob) downloadBlob(blob, `draft-${b.client_name}-${b.period_start}.xlsx`); }}>Preview Excel</button>
+        </>}
         {b.status === 'generated' && can('bill.submit') && <button className="btn ok" onClick={() => setConfirm({ text: 'Mark this bill as submitted to the department?', reason: 'Submission / diary reference', label: 'Mark submitted', fn: (ref) => api.post(`/bills/${id}/submit`, { submission_ref: ref }) })}>Mark submitted</button>}
         {['approved', 'generated', 'submitted'].includes(b.status) && can('bill.prepare') && <button className="btn" onClick={() => setConfirm({ text: 'Create a controlled revision? The approved bill stays unchanged until the revision is approved, then it is marked superseded.', reason: 'Why is a revision needed?', label: 'Create revision', fn: async (reason) => { const r = await api.post(`/bills/${id}/revise`, { reason }); nav(`/billing/${r.id}`); return r; } })}>Revise</button>}
         {editable && can('bill.prepare') && <button className="btn danger" onClick={() => setConfirm({ text: 'Cancel this bill? Its duties become available for billing again.', reason: 'Reason', label: 'Cancel bill', danger: true, fn: (reason) => api.post(`/bills/${id}/cancel`, { reason }) })}>Cancel bill</button>}

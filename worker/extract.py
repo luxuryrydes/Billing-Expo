@@ -10,9 +10,29 @@ formulas are read as cached values only, and nothing in a file is evaluated.
 """
 import json
 import os
+import re
 import sys
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 MAX_PAGES = 400
+
+
+def undouble(s):
+    """Some PDFs draw bold text twice, so table extraction yields 'CCoonnttrraacctt'.
+    Collapse words whose characters are all doubled; leave everything else untouched."""
+    if not s:
+        return s
+
+    def fix(m):
+        w = m.group(0)
+        # Only words with letters: amounts such as "2200" or "3300" must never change.
+        if len(w) >= 4 and len(w) % 2 == 0 and re.search("[A-Za-z]", w) and w[0::2] == w[1::2]:
+            return w[0::2]
+        return w
+
+    return re.sub(r"\S+", fix, s)
 
 
 def pdf_extract(path):
@@ -36,7 +56,7 @@ def pdf_extract(path):
         if plumber is not None:
             try:
                 for t in plumber.pages[i].extract_tables():
-                    tables.append([[("" if c is None else str(c).strip()) for c in row] for row in t])
+                    tables.append([[("" if c is None else undouble(str(c).strip())) for c in row] for row in t])
             except Exception as e:  # table detection is best-effort
                 warnings.append(f"Page {i + 1}: table extraction failed ({e.__class__.__name__})")
         if len(text.strip()) < 20:
@@ -80,6 +100,32 @@ def xlsx_extract(path):
     return {"method": "openpyxl", "pages": pages, "warnings": [], "pageCount": len(pages)}
 
 
+def xls_extract(path):
+    """Legacy Excel 97-2003 workbooks (cell values only; macros are never run)."""
+    import xlrd
+
+    book = xlrd.open_workbook(path)
+    pages = []
+    for n, sh in enumerate(book.sheets()):
+        rows = []
+        for r in range(sh.nrows):
+            vals = []
+            for c in range(sh.ncols):
+                cell = sh.cell(r, c)
+                if cell.ctype == xlrd.XL_CELL_DATE:
+                    y, mo, d, h, mi, _ = xlrd.xldate_as_tuple(cell.value, book.datemode)
+                    vals.append(f"{y:04d}-{mo:02d}-{d:02d}" + (f" {h:02d}:{mi:02d}" if (h or mi) else ""))
+                elif cell.ctype == xlrd.XL_CELL_NUMBER:
+                    v = cell.value
+                    vals.append(str(int(v)) if float(v).is_integer() else str(v))
+                else:
+                    vals.append(str(cell.value).strip())
+            rows.append(vals)
+        text = "\n".join(" | ".join(r) for r in rows if any(r))
+        pages.append({"page": n + 1, "sheet": sh.name, "text": text, "tables": [rows]})
+    return {"method": "xlrd", "pages": pages, "warnings": [], "pageCount": len(pages)}
+
+
 def docx_extract(path):
     import docx
 
@@ -117,6 +163,8 @@ def main():
             out = pdf_extract(path)
         elif ext in (".xlsx", ".xlsm"):
             out = xlsx_extract(path)
+        elif ext == ".xls":
+            out = xls_extract(path)
         elif ext == ".docx":
             out = docx_extract(path)
         elif ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff"):
@@ -129,7 +177,9 @@ def main():
             out = {"error": f"Unsupported file type {ext}"}
     except Exception as e:
         out = {"error": f"{e.__class__.__name__}: {e}"}
-    sys.stdout.write(json.dumps(out, ensure_ascii=False))
+    # Always UTF-8, whatever the console code page (e.g. cp1252 on Windows).
+    sys.stdout.buffer.write(json.dumps(out, ensure_ascii=False).encode("utf-8"))
+    sys.stdout.flush()
     return 0 if "error" not in out else 1
 
 

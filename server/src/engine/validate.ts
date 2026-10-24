@@ -84,6 +84,8 @@ export function validateDuty(d: DutyForValidation, s: ValidationSettings, ctx: V
     if (v === null || v === undefined || String(v).trim() === '') push('MISSING_FIELD', 'error', `${LABELS[f] ?? f} is required`, f);
   }
 
+  if (d.vehicleRegNo && !/\d/.test(d.vehicleRegNo)) push('INVALID_VEHICLE_NO', 'error', `"${d.vehicleRegNo}" is not a vehicle number`, 'vehicleRegNo');
+
   if (d.startKm && !isNum(d.startKm)) push('INVALID_NUMBER', 'error', 'Starting km is not a number', 'startKm');
   if (d.endKm && !isNum(d.endKm)) push('INVALID_NUMBER', 'error', 'Closing km is not a number', 'endKm');
   if (isNum(d.startKm) && isNum(d.endKm)) {
@@ -91,6 +93,8 @@ export function validateDuty(d: DutyForValidation, s: ValidationSettings, ctx: V
     if (dec(d.startKm).isNeg() || dec(d.endKm).isNeg()) push('NEGATIVE_KM', 'error', 'Odometer readings cannot be negative', 'startKm');
     if (km.isNeg()) push('ODOMETER_REVERSED', 'error', `Closing km (${d.endKm}) is lower than starting km (${d.startKm})`, 'endKm');
     else if (km.isZero()) push('ZERO_KM', 'warning', 'Distance is zero', 'endKm');
+    // Far beyond any plausible day (usually a mistyped odometer): an error, so it cannot be waived into a bill.
+    else if (km.gt(s.maxKmPerDuty * 5)) push('IMPLAUSIBLE_KM', 'error', `Distance ${km.toString()} km is not plausible for one duty — check the odometer readings (${d.startKm} → ${d.endKm})`, 'endKm');
     else if (km.gt(s.maxKmPerDuty)) push('HIGH_KM', 'warning', `Distance ${km.toString()} km exceeds the review threshold of ${s.maxKmPerDuty} km`, 'endKm');
   }
 

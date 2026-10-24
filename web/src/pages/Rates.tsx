@@ -7,6 +7,7 @@ import { Confirm, ErrorBox, Field, Loading, Modal, PageHead, Status, useAction }
 import { d, inr } from '../format';
 import { useCategories, useClients, useContracts, useDutyTypes } from '../lookups';
 import { blankConfig } from './Contracts';
+import { ImportDialog } from '../components/ImportDialog';
 
 const MODELS: [string, string][] = [
   ['daily_package', 'Daily package (km + hours)'], ['monthly_package', 'Monthly vehicle hire'], ['monthly_limit', 'Monthly km/hour limit + excess'],
@@ -41,12 +42,15 @@ export function RateSchemesPage() {
   const { run } = useAction();
   const nav = useNavigate();
   const [adding, setAdding] = useState(false);
+  const [importFor, setImportFor] = useState<string | null>(null);
+  const [pickContract, setPickContract] = useState(false);
   const [f, setF] = useState({ contract_id: '', name: '', description: '' });
   return (
     <>
       <PageHead title="Rate Schemes" sub="Versioned, effective-dated billing rules per contract, vehicle category and duty type. Only approved versions are used for bills.">
         <select value={clientId} onChange={(e) => { setClientId(e.target.value); setContractId(''); }}><option value="">All departments</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
         <select value={contractId} onChange={(e) => setContractId(e.target.value)}><option value="">All contracts</option>{contracts.data?.map((k) => <option key={k.id} value={k.id}>{k.reference_no}</option>)}</select>
+        {can('rate.write') && <button className="btn" onClick={() => (contractId ? setImportFor(contractId) : setPickContract(true))}>Import rate card</button>}
         {can('rate.write') && <button className="btn primary" onClick={() => { setF({ contract_id: contractId, name: '', description: '' }); setAdding(true); }}>New scheme</button>}
       </PageHead>
       <ErrorBox error={q.error} />
@@ -65,6 +69,14 @@ export function RateSchemesPage() {
           </table>
         )}
       </div>
+      {pickContract && (
+        <Modal title="Import rate card — choose the contract" onClose={() => setPickContract(false)}>
+          <ContractPicker value={f.contract_id} onChange={(v) => setF({ ...f, contract_id: v })} />
+          <div className="row end" style={{ marginTop: 12 }}><button className="btn" onClick={() => setPickContract(false)}>Cancel</button>
+            <button className="btn primary" disabled={!f.contract_id} onClick={() => { setPickContract(false); setImportFor(f.contract_id); }}>Continue</button></div>
+        </Modal>
+      )}
+      {importFor && <ImportDialog entity="rate_card" contractId={importFor} contextLabel={(() => { const k = contracts.data?.find((x) => x.id === importFor); return k ? `${k.client_name} — ${k.reference_no}` : undefined; })()} onClose={() => setImportFor(null)} onDone={() => q.refetch()} />}
       {adding && (
         <Modal title="New rate scheme" onClose={() => setAdding(false)}>
           <div className="grid">

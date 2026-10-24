@@ -54,6 +54,42 @@ export async function reportRoutes(app: FastifyInstance) {
        ORDER BY c.name, b.period_start`, [q.from, q.to, q.clientId ?? null]);
   });
 
+  /** Billing data export: every bill in the period with its totals and tax lines (one sheet), plus line detail (second sheet). */
+  app.get('/reports/billing-summary.xlsx', { preHandler: perm('export') }, async (req, reply) => {
+    const q = parse(z.object({ from: isoDate, to: isoDate, clientId: uuid.optional(), includeDrafts: z.coerce.boolean().optional() }), req.query);
+    const bills = await db.query<Record<string, string | number | null>>(
+      `SELECT b.id, c.name AS client_name, c.gstin, k.reference_no, b.bill_no, b.revision_no, b.bill_date, b.period_start, b.period_end, b.period_type, b.status,
+              b.taxable_value, b.non_taxable_total, b.tax_total, b.round_off, b.grand_total,
+              (SELECT string_agg(t.tax_type || ' ' || trim(to_char(t.rate, 'FM990.99')) || '%: ' || t.amount, '; ') FROM bill_tax_lines t WHERE t.bill_id = b.id AND t.snapshot_id = b.current_snapshot_id) AS taxes,
+              (SELECT count(*)::int FROM bill_duties bd WHERE bd.bill_id = b.id) AS duties
+       FROM bills b JOIN clients c ON c.id = b.client_id JOIN contracts k ON k.id = b.contract_id
+       WHERE b.period_start >= $1 AND b.period_start <= $2 AND ($3::uuid IS NULL OR b.client_id = $3)
+         AND (b.status IN ('approved','generated','submitted') OR ($4::boolean AND b.status NOT IN ('cancelled','superseded')))
+       ORDER BY c.name, b.period_start, b.bill_no`, [q.from, q.to, q.clientId ?? null, q.includeDrafts ?? false]);
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Bills');
+    ws.addRow(['Department', 'Client GSTIN', 'Contract', 'Bill no.', 'Rev.', 'Bill date', 'Period from', 'Period to', 'Bill type', 'Status', 'Duties', 'Taxable', 'Non-taxable', 'Tax', 'Taxes', 'Round off', 'Total']).font = { bold: true };
+    for (const b of bills) {
+      const r = ws.addRow([b.client_name, b.gstin, b.reference_no, b.bill_no ?? 'DRAFT', b.revision_no, b.bill_date, b.period_start, b.period_end, b.period_type === 'date' ? 'Date-wise' : b.period_type === 'month' ? 'Month-wise' : 'Period', b.status, b.duties,
+        Number(b.taxable_value ?? 0), Number(b.non_taxable_total ?? 0), Number(b.tax_total ?? 0), b.taxes, Number(b.round_off ?? 0), Number(b.grand_total ?? 0)]);
+      [12, 13, 14, 16, 17].forEach((i) => (r.getCell(i).numFmt = INR_FMT));
+    }
+    ws.columns.forEach((c, i) => (c.width = [26, 18, 20, 20, 5, 11, 11, 11, 11, 11, 7, 13, 13, 12, 30, 9, 14][i]));
+    const lines = wb.addWorksheet('Lines');
+    lines.addRow(['Bill no.', 'Duty date', 'Vehicle', 'Component', 'Quantity', 'Unit', 'Rate', 'Amount', 'Tax category']).font = { bold: true };
+    for (const b of bills) {
+      const ls = await db.query<Record<string, string>>(`SELECT l.*, d.duty_date FROM bill_lines l JOIN bills b ON b.id = l.bill_id AND l.snapshot_id = b.current_snapshot_id LEFT JOIN duties d ON d.id = l.duty_id WHERE l.bill_id = $1 ORDER BY l.sort_order`, [b.id as string]);
+      for (const l of ls) {
+        const r = lines.addRow([b.bill_no ?? 'DRAFT', l.duty_date, l.vehicle_reg_no, l.label, Number(l.quantity), l.unit, Number(l.rate), Number(l.amount), l.tax_category]);
+        r.getCell(3).numFmt = '@';
+        r.getCell(8).numFmt = INR_FMT;
+      }
+    }
+    reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    reply.header('Content-Disposition', `attachment; filename="billing-data_${q.from}_${q.to}.xlsx"`);
+    return reply.send(Buffer.from(await wb.xlsx.writeBuffer()));
+  });
+
   app.get('/reports/tax-summary', { preHandler: perm('view') }, async (req) => {
     const q = parse(z.object({ from: isoDate, to: isoDate }), req.query);
     return db.query(

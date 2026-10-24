@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { audit } from '../lib/audit.js';
 import { perm } from '../lib/auth.js';
-import { badRequest, conflict, decimalStr, forbidden, isoDate, notFound, optText, parse, uuid } from '../lib/http.js';
+import { badRequest, conflict, decimalStr, forbidden, isoDate, notFound, optDecimal, optText, parse, uuid } from '../lib/http.js';
 import { getSetting } from './master.js';
 
 const ClientSchema = z.object({
@@ -18,6 +18,8 @@ const ClientSchema = z.object({
   contact_phone: optText,
   special_instructions: optText,
   status: z.enum(['active', 'inactive']).default('active'),
+  /** Codes this department is known by on shared duty sheets, e.g. DRI */
+  aliases: z.array(z.string().trim().min(1)).default([]),
 });
 
 const CustomFieldSchema = z.object({
@@ -35,13 +37,16 @@ const ContractSchema = z.object({
   po_number: optText,
   start_date: isoDate,
   end_date: isoDate.nullable().optional(),
-  billing_frequency: z.enum(['monthly', 'fortnightly', 'weekly', 'per_trip']).default('monthly'),
+  billing_frequency: z.enum(['monthly', 'fortnightly', 'weekly', 'daily', 'per_trip']).default('monthly'),
   status: z.enum(['draft', 'active', 'expired', 'terminated']).default('draft'),
   tax_mode: z.enum(['exclusive', 'inclusive']).default('exclusive'),
   tax_level: z.enum(['document', 'line']).default('document'),
   invoice_rounding: z.enum(['none', 'nearest_rupee', 'up_rupee', 'down_rupee']).default('none'),
   approval_levels: z.union([z.literal(1), z.literal(2)]).default(1),
   bill_no_format: z.string().min(1).default('{CLIENT}/{YYYY}-{MM}/{SEQ}'),
+  bid_no: optText,
+  sac_code: optText,
+  contract_value: optDecimal,
   required_formats: optText,
   special_instructions: optText,
   validation: z
@@ -91,6 +96,7 @@ export async function clientRoutes(app: FastifyInstance) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [b.name, b.short_code, b.billing_address, b.gstin, b.pan, b.state_name, b.state_code, b.contact_name, b.contact_email, b.contact_phone, b.special_instructions, b.status],
     );
+    await db.query('UPDATE clients SET aliases = $2::text[] WHERE id = $1', [row!.id, b.aliases.map((x) => x.toUpperCase())]);
     await audit(db, req.user!.id, 'client', row!.id, 'create', undefined, b);
     return row;
   });
@@ -104,6 +110,7 @@ export async function clientRoutes(app: FastifyInstance) {
        WHERE id=$1 RETURNING *`,
       [id, b.name, b.short_code, b.billing_address, b.gstin, b.pan, b.state_name, b.state_code, b.contact_name, b.contact_email, b.contact_phone, b.special_instructions, b.status],
     );
+    await db.query('UPDATE clients SET aliases = $2::text[] WHERE id = $1', [id, b.aliases.map((x) => x.toUpperCase())]);
     await audit(db, req.user!.id, 'client', id, 'update', before, row);
     return row;
   });
@@ -149,6 +156,7 @@ export async function clientRoutes(app: FastifyInstance) {
       [b.client_id, b.supplier_profile_id ?? null, b.title, b.reference_no, b.po_number, b.start_date, b.end_date ?? null, b.billing_frequency, b.status, b.tax_mode, b.tax_level,
         b.invoice_rounding, b.approval_levels, b.bill_no_format, b.required_formats, b.special_instructions, b.validation, JSON.stringify(b.custom_fields)],
     );
+    await db.query('UPDATE contracts SET bid_no = $2, sac_code = $3, contract_value = $4 WHERE id = $1', [row!.id, b.bid_no, b.sac_code, b.contract_value]);
     await audit(db, req.user!.id, 'contract', row!.id, 'create', undefined, b);
     return row;
   });
@@ -164,6 +172,7 @@ export async function clientRoutes(app: FastifyInstance) {
       [id, b.client_id, b.supplier_profile_id ?? null, b.title, b.reference_no, b.po_number, b.start_date, b.end_date ?? null, b.billing_frequency, b.status,
         b.tax_mode, b.tax_level, b.invoice_rounding, b.approval_levels, b.bill_no_format, b.required_formats, b.special_instructions, b.validation, JSON.stringify(b.custom_fields)],
     );
+    await db.query('UPDATE contracts SET bid_no = $2, sac_code = $3, contract_value = $4 WHERE id = $1', [id, b.bid_no, b.sac_code, b.contract_value]);
     await audit(db, req.user!.id, 'contract', id, 'update', before, row);
     return row;
   });

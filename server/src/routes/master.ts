@@ -11,7 +11,8 @@ export const SETTINGS_DEFAULTS: Record<string, unknown> = {
   validation: DEFAULT_VALIDATION,
   /** When true, the person who prepared a bill / rate cannot approve it. */
   makerChecker: false,
-  billNoSequenceStart: 1,
+  /** Next number per bill-number series prefix, to continue a series begun outside this system, e.g. { "LRTH/26-27/": 768 }. */
+  billSeriesNext: {},
 };
 
 export async function getSetting<T>(db: Db, key: string): Promise<T> {
@@ -89,18 +90,20 @@ export async function masterRoutes(app: FastifyInstance) {
 
   // Vehicle categories & duty types ------------------------------------------
   app.get('/vehicle-categories', { preHandler: perm('view') }, async () => db.query('SELECT * FROM vehicle_categories ORDER BY name'));
+  const CategorySchema = z.object({ name: z.string().trim().min(1), description: optText, aliases: z.array(z.string().trim().min(1)).default([]) });
   app.post('/vehicle-categories', { preHandler: perm('settings.write') }, async (req) => {
-    const b = parse(z.object({ name: z.string().trim().min(1), description: optText }), req.body);
-    const row = await db.one<{ id: string }>('INSERT INTO vehicle_categories(name, description) VALUES ($1,$2) RETURNING *', [b.name, b.description]);
+    const b = parse(CategorySchema, req.body);
+    const row = await db.one<{ id: string }>('INSERT INTO vehicle_categories(name, description, aliases) VALUES ($1,$2,$3::text[]) RETURNING *', [b.name, b.description, b.aliases]);
     await audit(db, req.user!.id, 'vehicle_category', row!.id, 'create', undefined, b);
     return row;
   });
   app.put('/vehicle-categories/:id', { preHandler: perm('settings.write') }, async (req) => {
     const { id } = req.params as { id: string };
-    const b = parse(z.object({ name: z.string().trim().min(1), description: optText }), req.body);
-    const row = await db.one('UPDATE vehicle_categories SET name=$2, description=$3 WHERE id=$1 RETURNING *', [id, b.name, b.description]);
-    if (!row) throw notFound('Vehicle category');
-    await audit(db, req.user!.id, 'vehicle_category', id, 'update', undefined, b);
+    const b = parse(CategorySchema, req.body);
+    const before = await db.one('SELECT * FROM vehicle_categories WHERE id = $1', [id]);
+    if (!before) throw notFound('Vehicle category');
+    const row = await db.one('UPDATE vehicle_categories SET name=$2, description=$3, aliases=$4::text[] WHERE id=$1 RETURNING *', [id, b.name, b.description, b.aliases]);
+    await audit(db, req.user!.id, 'vehicle_category', id, 'update', before, row);
     return row;
   });
 

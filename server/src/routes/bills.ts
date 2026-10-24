@@ -16,6 +16,9 @@ export async function billRoutes(app: FastifyInstance) {
       `SELECT b.*, c.name AS client_name, c.short_code, k.reference_no AS contract_ref, k.title AS contract_title,
               (SELECT count(*)::int FROM bill_duties bd WHERE bd.bill_id = b.id) AS duty_count,
               (SELECT count(*)::int FROM billing_exceptions e WHERE e.bill_id = b.id AND e.status = 'open') AS open_exceptions,
+              (SELECT g.file_id FROM generated_files g WHERE g.bill_id = b.id AND g.kind = 'bill_pdf' ORDER BY g.created_at DESC LIMIT 1) AS pdf_file_id,
+              (SELECT g.file_id FROM generated_files g WHERE g.bill_id = b.id AND g.kind = 'bill_xlsx' ORDER BY g.created_at DESC LIMIT 1) AS xlsx_file_id,
+              b.period_type,
               u.name AS created_by_name
        FROM bills b JOIN clients c ON c.id = b.client_id JOIN contracts k ON k.id = b.contract_id LEFT JOIN app_users u ON u.id = b.created_by
        WHERE ($1::uuid IS NULL OR b.client_id = $1) AND ($2::uuid IS NULL OR b.contract_id = $2) AND ($3::text IS NULL OR b.status = $3)
@@ -25,26 +28,55 @@ export async function billRoutes(app: FastifyInstance) {
     );
   });
 
-  app.post('/bills', { preHandler: perm('bill.prepare') }, async (req) => {
-    const b = parse(z.object({ contract_id: uuid, period_start: isoDate, period_end: isoDate, bill_date: isoDate.optional(), template_version_id: uuid.nullable().optional(), include_unverified: z.boolean().default(true), notes: optText }), req.body);
+  const NewBill = z.object({
+    contract_id: uuid, period_start: isoDate, period_end: isoDate, bill_date: isoDate.optional(), template_version_id: uuid.nullable().optional(),
+    include_unverified: z.boolean().default(true), notes: optText, period_type: z.enum(['month', 'date', 'range']).optional(),
+  });
+  const createBill = async (b: z.infer<typeof NewBill>, userId: string) => {
     if (b.period_end < b.period_start) throw badRequest('Period end is before period start');
     const k = await db.one<{ client_id: string; status: string }>('SELECT client_id, status FROM contracts WHERE id = $1', [b.contract_id]);
     if (!k) throw notFound('Contract');
-    const dup = await db.one<{ id: string; status: string }>(
-      `SELECT id, status FROM bills WHERE contract_id = $1 AND status NOT IN ('cancelled','superseded') AND period_start <= $3 AND period_end >= $2 LIMIT 1`, [b.contract_id, b.period_start, b.period_end]);
-    if (dup) throw conflict(`A ${dup.status} bill already covers part of this period. Open it, or cancel it first.`);
+    const dup = await db.one<{ id: string; status: string; period_start: string; period_end: string }>(
+      `SELECT id, status, period_start, period_end FROM bills WHERE contract_id = $1 AND status NOT IN ('cancelled','superseded') AND period_start <= $3 AND period_end >= $2 LIMIT 1`, [b.contract_id, b.period_start, b.period_end]);
+    if (dup) throw conflict(`A ${dup.status} bill (${dup.period_start} – ${dup.period_end}) already covers part of this period. Open it, or cancel it first.`);
+    const isMonth = b.period_start.endsWith('-01') && b.period_start.slice(0, 7) === b.period_end.slice(0, 7) && addDays(b.period_end, 1).endsWith('-01');
+    const periodType = b.period_type ?? (b.period_start === b.period_end ? 'date' : isMonth ? 'month' : 'range');
     // Default template: latest approved version for the contract, else for the client.
     const tv = b.template_version_id ?? (await db.one<{ id: string }>(
       `SELECT v.id FROM billing_template_versions v JOIN billing_templates t ON t.id = v.template_id
        WHERE v.status = 'approved' AND (t.contract_id = $1 OR (t.contract_id IS NULL AND t.client_id = $2)) ORDER BY (t.contract_id IS NOT NULL) DESC, v.approved_at DESC LIMIT 1`,
       [b.contract_id, k.client_id]))?.id ?? null;
     const row = await db.one<{ id: string }>(
-      `INSERT INTO bills(client_id, contract_id, period_start, period_end, bill_date, template_version_id, include_unverified, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [k.client_id, b.contract_id, b.period_start, b.period_end, b.bill_date ?? addDays(b.period_end, 1), tv, b.include_unverified, b.notes, req.user!.id],
+      `INSERT INTO bills(client_id, contract_id, period_start, period_end, period_type, bill_date, template_version_id, include_unverified, notes, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [k.client_id, b.contract_id, b.period_start, b.period_end, periodType, b.bill_date ?? addDays(b.period_end, 1), tv, b.include_unverified, b.notes, userId],
     );
-    await audit(db, req.user!.id, 'bill', row!.id, 'create', undefined, b);
-    return row;
+    await audit(db, userId, 'bill', row!.id, 'create', undefined, { ...b, period_type: periodType });
+    return row!;
+  };
+
+  app.post('/bills', { preHandler: perm('bill.prepare') }, async (req) => createBill(parse(NewBill, req.body), req.user!.id));
+
+  /** Date-wise billing: one draft bill per duty date of the month that has unbilled duties. */
+  app.post('/bills/date-wise', { preHandler: perm('bill.prepare') }, async (req) => {
+    const b = parse(z.object({ contract_id: uuid, month: z.string().regex(/^\d{4}-\d{2}$/), bill_date: isoDate.optional(), include_unverified: z.boolean().default(true) }), req.body);
+    const from = `${b.month}-01`;
+    const to = addDays(`${addDays(from, 32).slice(0, 7)}-01`, -1);
+    const dates = await db.query<{ duty_date: string; n: number }>(
+      `SELECT d.duty_date, count(*)::int AS n FROM duties d WHERE d.contract_id = $1 AND d.duty_date BETWEEN $2 AND $3 AND d.status <> 'void'
+         AND NOT EXISTS (SELECT 1 FROM bill_duties bd WHERE bd.duty_id = d.id AND bd.active)
+       GROUP BY d.duty_date ORDER BY d.duty_date`, [b.contract_id, from, to]);
+    const created: { id: string; date: string; duties: number }[] = [];
+    const skipped: { date: string; reason: string }[] = [];
+    for (const d of dates) {
+      try {
+        const bill = await createBill({ contract_id: b.contract_id, period_start: d.duty_date, period_end: d.duty_date, bill_date: b.bill_date, include_unverified: b.include_unverified, notes: null, period_type: 'date' }, req.user!.id);
+        created.push({ id: bill.id, date: d.duty_date, duties: d.n });
+      } catch (e) {
+        skipped.push({ date: d.duty_date, reason: (e as Error).message });
+      }
+    }
+    return { created, skipped };
   });
 
   app.get('/bills/:id', { preHandler: perm('view') }, async (req) => {
