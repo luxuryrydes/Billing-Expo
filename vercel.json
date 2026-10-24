@@ -4,6 +4,7 @@
     "server": {
       "root": "server",
       "framework": "fastify",
+      "entrypoint": "src/index.ts",
       "bindings": [
         { "type": "service", "service": "worker", "format": "url", "env": "WORKER_URL" }
       ]
