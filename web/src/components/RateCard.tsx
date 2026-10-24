@@ -176,10 +176,11 @@ const show = (v: unknown) => (v == null || v === '' ? '—' : Array.isArray(v) ?
  * see exactly what would change → confirm. Only departments and rates that differ from what is
  * saved are written; everything else stays as it is, and nothing is removed because a row is missing.
  */
-export function RegisterImportDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+export function RegisterImportDialog({ onClose, onDone, preview }: { onClose: () => void; onDone: () => void; preview?: any }) {
   const fy = (() => { const t = today(); const y = Number(t.slice(0, 4)) - (Number(t.slice(5, 7)) < 4 ? 1 : 0); return `${y}-04-01`; })();
-  const [p, setP] = useState<any>(null);
-  const [opts, setOpts] = useState<any>({ newRatesFrom: fy, changesFrom: today(), approve: false, hourRoundingMode: 'ceil', hourRoundingUnit: '30' });
+  // `preview` is an upload already analysed elsewhere (e.g. picked on Set up from documents).
+  const [p, setP] = useState<any>(preview ?? null);
+  const [opts, setOpts] = useState<any>(() => ({ newRatesFrom: fy, changesFrom: today(), approve: false, hourRoundingMode: 'ceil', hourRoundingUnit: '30', ...(preview ? { ...preview.options, approve: preview.canApprove && preview.options.approve } : {}) }));
   const [tab, setTab] = useState<'changes' | 'departments' | 'rates' | 'errors'>('changes');
   const [skipInvalid, setSkipInvalid] = useState(false);
   const [busy, setBusy] = useState(false);

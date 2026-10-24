@@ -3,10 +3,12 @@ import { Link } from 'react-router-dom';
 import { api, errorText } from '../api';
 import { useAuth } from '../auth';
 import { ErrorBox, Field, PageHead, useAction } from '../components/ui';
+import { RegisterImportDialog } from '../components/RateCard';
 import { d, inr } from '../format';
 import { useClients } from '../lookups';
 
 const DOC_TYPES: [string, string][] = [
+  ['rate_register', 'Department & Rate Register (all departments)'],
   ['contract', 'Contract / GeM order'], ['rate_schedule', 'Rate schedule / BOQ'], ['sample_invoice', 'Sample bill (billing format)'], ['duty_sheet', 'Duty sheet'],
   ['tender', 'Tender'], ['scc', 'SCC'], ['acc', 'ACC'], ['work_order', 'Work order'], ['other', 'Other'],
 ];
@@ -27,7 +29,8 @@ type Step = 'upload' | 'reading' | 'review' | 'done';
 export function OnboardingPage() {
   const { can } = useAuth();
   const [step, setStep] = useState<Step>('upload');
-  const [files, setFiles] = useState<{ file: File; type: string }[]>([]);
+  const [files, setFiles] = useState<{ file: File; type: string; register?: any; checking?: boolean }[]>([]);
+  const [register, setRegister] = useState<any>(null);
   const [useAi, setUseAi] = useState(true);
   const [docs, setDocs] = useState<{ name: string; documentId: string; versionId: string; status: string; error?: string }[]>([]);
   const [session, setSession] = useState<string>('');
@@ -36,8 +39,37 @@ export function OnboardingPage() {
   const [created, setCreated] = useState<any>(null);
   const { run, busy } = useAction();
 
+  /**
+   * The Department & Rate Register covers every department at once, so it is not read as one
+   * department's documents: it goes to the register import, which applies only the changes.
+   */
+  const checkRegister = async (f: File): Promise<any> => {
+    const fd = new FormData();
+    fd.append('file', f);
+    try {
+      const r = await api.post('/imports/register/upload', fd);
+      return r.sheets?.rates && r.rates?.length ? r : null;
+    } catch { return null; }
+  };
+  const addFiles = async (list: File[]) => {
+    const added = list.map((f) => ({ file: f, type: guessType(f.name), checking: /\.xlsx?$/i.test(f.name) }));
+    setFiles((cur) => [...cur, ...added]);
+    for (const a of added.filter((x) => x.checking)) {
+      const r = await checkRegister(a.file);
+      setFiles((cur) => cur.map((x) => (x.file === a.file ? { ...x, checking: false, register: r, type: r ? 'rate_register' : x.type } : x)));
+    }
+  };
+
   const upload = async () => {
     setError(null);
+    const reg = files.find((f) => f.type === 'rate_register');
+    if (reg) {
+      const r = reg.register ?? (await checkRegister(reg.file));
+      if (!r) { setError(new Error(`${reg.file.name} is not a Department & Rate Register (it needs a Department Rate Register sheet with Department, Vehicle and Base Fare columns). Choose what it is in the list.`)); return; }
+      setRegister(r);
+      setFiles(files.filter((f) => f !== reg));
+      return;
+    }
     const out: typeof docs = [];
     for (const f of files) {
       const fd = new FormData();
@@ -96,20 +128,23 @@ export function OnboardingPage() {
       {step === 'upload' && (
         <div className="panel grid" style={{ maxWidth: 900 }}>
           <Field label="Documents" hint="PDF, Excel, Word or scanned images. Examples: GeM contract, rate schedule / BOQ, a previous bill in the department's format, the day-to-day duty sheet.">
-            <input type="file" multiple accept=".pdf,.xlsx,.csv,.docx,.png,.jpg,.jpeg" onChange={(e) => setFiles([...files, ...Array.from(e.target.files ?? []).map((f) => ({ file: f, type: guessType(f.name) }))])} />
+            <input type="file" multiple accept=".pdf,.xlsx,.xls,.csv,.docx,.png,.jpg,.jpeg" onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
           </Field>
           {files.length > 0 && (
             <table className="t"><thead><tr><th>File</th><th>What it is</th><th /></tr></thead>
               <tbody>{files.map((f, i) => (
-                <tr key={i}><td>{f.file.name}</td>
+                <tr key={i}><td>{f.file.name}{f.checking && <div className="small muted">checking…</div>}
+                  {f.register && <div className="small muted">All departments and rate cards: {f.register.summary.departments.rows} departments, {f.register.summary.rates.rows} rates. Imported through the rate register; only changes are applied.</div>}</td>
                   <td><select value={f.type} onChange={(e) => setFiles(files.map((x, j) => (j === i ? { ...x, type: e.target.value } : x)))}>{DOC_TYPES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></td>
                   <td><button className="btn sm danger" onClick={() => setFiles(files.filter((_, j) => j !== i))}>Remove</button></td></tr>
               ))}</tbody></table>
           )}
           <label className="check"><input type="checkbox" checked={useAi} onChange={(e) => setUseAi(e.target.checked)} />Also use AI reading where configured (every AI value must quote the document)</label>
-          <div className="row end"><button className="btn primary" disabled={!files.length} onClick={upload}>Upload and read</button></div>
+          <div className="row end"><button className="btn primary" disabled={!files.length || files.some((f) => f.checking)} onClick={upload}>{files.some((f) => f.type === 'rate_register') ? 'Review register changes' : 'Upload and read'}</button></div>
         </div>
       )}
+
+      {register && <RegisterImportDialog preview={register} onClose={() => setRegister(null)} onDone={() => undefined} />}
 
       {step === 'reading' && (
         <div className="panel">
