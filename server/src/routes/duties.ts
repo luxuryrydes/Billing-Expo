@@ -7,7 +7,7 @@ import { badRequest, forbidden, isoDate, notFound, parse, uuid } from '../lib/ht
 import { checkUpload, filePath, loadFile, saveFile } from '../lib/storage.js';
 import { addDays } from '../engine/time.js';
 import {
-  assertDutyEditable, computeIssues, contractCtx, DUTY_SELECT, DutyInputSchema, dutyRowToApi, insertDuty, updateDuty, validationSettings,
+  assertDutyEditable, computeIssues, contractCtx, DUTY_SELECT, DutyInputSchema, dutyRowToApi, findSameDuty, insertDuty, mergeDuty, updateDuty, validationSettings,
   type ContractCtx, type DutyInputT,
 } from '../services/duties.js';
 import { autoMap, IMPORT_FIELDS, isBlankMark, parseDate, parseNumber, parseTime, readAnySheet, type ImportField } from '../services/import.js';
@@ -275,9 +275,13 @@ export async function dutyRoutes(app: FastifyInstance) {
       });
     }
 
-    const results: { rowNumber: number; contractId: string; issues: unknown[]; parseError?: string; input: unknown }[] = [];
+    type Action = 'add' | 'update' | 'unchanged' | 'locked';
+    const results: { rowNumber: number; contractId: string; issues: unknown[]; parseError?: string; input: unknown; action?: Action; dutyId?: string; changes?: unknown[]; note?: string }[] = [];
     const doWork = async (t: typeof db) => {
       const batches = new Map<string, string>();
+      // A sheet uploaded again: duties already saved are matched, unchanged ones are left alone,
+      // changed ones are updated in place, and only rows not seen before are added.
+      const taken = new Set<string>();
       for (const p of prepared) {
         const cid = String(p.input.contractId);
         const { k, s } = await ctxFor(t, cid);
@@ -286,8 +290,29 @@ export async function dutyRoutes(app: FastifyInstance) {
           results.push({ rowNumber: p.rowNumber, contractId: cid, issues: p.extra, parseError: parsedRow.error.issues.map((x) => `${x.path.join('.')}: ${x.message}`).join('; '), input: p.input });
           continue;
         }
+        const same = await findSameDuty(t, parsedRow.data, taken);
+        if (same) {
+          taken.add(String(same.id));
+          const { merged, changes } = mergeDuty(same, parsedRow.data);
+          if (!changes.length) {
+            results.push({ rowNumber: p.rowNumber, contractId: cid, issues: (same.issues as unknown[]) ?? [], input: merged, action: 'unchanged', dutyId: String(same.id) });
+            continue;
+          }
+          const locked = await assertDutyEditable(t, String(same.id)).then(() => null, (e: Error) => e.message);
+          if (locked) {
+            results.push({ rowNumber: p.rowNumber, contractId: cid, issues: (same.issues as unknown[]) ?? [], input: merged, action: 'locked', dutyId: String(same.id), changes, note: locked });
+            continue;
+          }
+          const issues = [...p.extra, ...(await computeIssues(t, merged, k, s))];
+          results.push({ rowNumber: p.rowNumber, contractId: cid, issues, input: merged, action: 'update', dutyId: String(same.id), changes });
+          if (!b.dryRun) {
+            await updateDuty(t, merged, k, issues, req.user!.id);
+            await audit(t, req.user!.id, 'duty', String(same.id), 'import_update', undefined, { file: f.original_name, row: p.rowNumber, changes });
+          }
+          continue;
+        }
         const issues = [...p.extra, ...(await computeIssues(t, parsedRow.data, k, s))];
-        results.push({ rowNumber: p.rowNumber, contractId: cid, issues, input: parsedRow.data });
+        results.push({ rowNumber: p.rowNumber, contractId: cid, issues, input: parsedRow.data, action: 'add' });
         if (!b.dryRun) {
           let batchId = batches.get(cid);
           if (!batchId) {
@@ -296,6 +321,7 @@ export async function dutyRoutes(app: FastifyInstance) {
             batches.set(cid, batchId);
           }
           const row = await insertDuty(t, parsedRow.data, k, issues, req.user!.id, 'import', batchId);
+          taken.add(String(row!.id));
           await audit(t, req.user!.id, 'duty', String(row!.id), 'import', undefined, { file: f.original_name, row: p.rowNumber });
         }
       }
@@ -310,7 +336,11 @@ export async function dutyRoutes(app: FastifyInstance) {
       batchIds,
       dryRun: b.dryRun,
       total: results.length,
-      imported: b.dryRun ? 0 : results.length - failed.length,
+      imported: b.dryRun ? 0 : results.filter((r) => r.action === 'add').length,
+      added: results.filter((r) => r.action === 'add').length,
+      updated: results.filter((r) => r.action === 'update').length,
+      unchanged: results.filter((r) => r.action === 'unchanged').length,
+      locked: results.filter((r) => r.action === 'locked').length,
       notImported: failed.length,
       skippedByDepartment: Object.fromEntries(skipped),
       byContract,

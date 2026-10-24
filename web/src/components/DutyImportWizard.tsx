@@ -89,18 +89,26 @@ export function DutyImportWizard({ contractId, onClose, onDone }: { contractId?:
             </div></details>
           {dry && (
             <div className="panel">
-              <b>Check result:</b> {dry.total} rows to import · {dry.withErrors} with errors · {dry.withWarnings} with warnings · {dry.notImported} cannot be imported
+              <b>Check result:</b> {dry.total} rows · <span className="badge ok">{dry.added} new</span> <span className="badge brand">{dry.updated} updated</span> <span className="badge">{dry.unchanged} already saved, no change</span>
+              {dry.locked > 0 && <> <span className="badge warn">{dry.locked} changed but on an approved bill — left as is</span></>}
+              {' '}· {dry.withErrors} with errors · {dry.withWarnings} with warnings · {dry.notImported} cannot be imported
+              <div className="small muted">Uploading the same sheet again only adds new duties and updates the ones that changed; everything else stays as it is.</div>
               {Object.keys(dry.byContract ?? {}).length > 0 && <div className="small">{Object.entries(dry.byContract).map(([k, n]) => `${label(k)}: ${n}`).join(' · ')}</div>}
               {Object.keys(dry.skippedByDepartment ?? {}).length > 0 && <div className="small muted">Skipped: {Object.entries(dry.skippedByDepartment).map(([k, n]) => `${k} ${n}`).join(', ')}</div>}
               <div className="scroll" style={{ maxHeight: 220 }}><table className="t"><tbody>
-                {dry.results.filter((r: any) => r.parseError || r.issues.length).map((r: any) => <tr key={r.rowNumber}><td>Row {r.rowNumber}</td><td className="small">{r.parseError && <span style={{ color: 'var(--err)' }}>{r.parseError}</span>}{r.issues.map((x: any, i: number) => <div key={i} style={{ color: x.severity === 'error' ? 'var(--err)' : 'var(--warn)' }}>{x.message}</div>)}</td></tr>)}
+                {dry.results.filter((r: any) => r.parseError || r.action === 'update' || r.action === 'locked' || (r.action === 'add' && r.issues.length)).map((r: any) => <tr key={r.rowNumber}><td>Row {r.rowNumber}</td>
+                  <td>{r.action && <span className={`badge ${r.action === 'add' ? 'ok' : r.action === 'update' ? 'brand' : r.action === 'locked' ? 'warn' : ''}`}>{({ add: 'New', update: 'Update', locked: 'Locked', unchanged: 'No change' } as any)[r.action]}</span>}</td>
+                  <td className="small">{r.parseError && <span style={{ color: 'var(--err)' }}>{r.parseError}</span>}
+                    {(r.changes ?? []).map((c: any) => <div key={c.field}><b>{c.field}</b>: {c.from ?? '—'} → {c.to ?? '—'}</div>)}
+                    {r.note && <div style={{ color: 'var(--warn)' }}>{r.note}</div>}
+                    {r.action !== 'locked' && r.issues.map((x: any, i: number) => <div key={i} style={{ color: x.severity === 'error' ? 'var(--err)' : 'var(--warn)' }}>{x.message}</div>)}</td></tr>)}
               </tbody></table></div>
             </div>
           )}
           <div className="row end">
             <button className="btn" onClick={() => setPrev(null)}>Back</button>
             <button className="btn" disabled={busy || !ready} onClick={async () => { const r = await run(() => api.post('/duties/import/commit', body(true))); if (r) setDry(r); }}>Check rows</button>
-            <button className="btn primary" disabled={busy || !dry} onClick={async () => { const r = await run(() => api.post('/duties/import/commit', body(false))); if (r) { alert(`Imported ${r.imported} duty row(s). ${r.withErrors} have errors and ${r.withWarnings} have warnings — review them in the Duty Register.`); onDone(); } }}>Import {dry ? dry.total - dry.notImported : ''} rows</button>
+            <button className="btn primary" disabled={busy || !dry} onClick={async () => { const r = await run(() => api.post('/duties/import/commit', body(false))); if (r) { alert(`${r.added} new duties added, ${r.updated} updated, ${r.unchanged} unchanged${r.locked ? `, ${r.locked} left as is (on approved bills)` : ''}. ${r.withErrors} have errors and ${r.withWarnings} have warnings — review them in the Duty Register.`); onDone(); } }}>{dry ? `Save ${dry.added} new, ${dry.updated} updated` : 'Import'}</button>
           </div>
         </div>
       )}

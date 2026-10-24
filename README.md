@@ -132,6 +132,14 @@ DATABASE_URL=data/demo-db STORAGE_DIR=data/demo-files npm run seed:demo
 8. **Billing Workspace → New bill:** pick contract and month, **Calculate**, review the Duties / Calculation / Exceptions tabs (click any line for its full trace), exclude or fix problem duties, accept warnings with a reason, **Submit for review**, **Approve**, **Generate Excel & PDF**, check the reconciliation, download, **Mark submitted** with the diary reference.
 9. Corrections after approval: **Revise** on the bill.
 
+**Department & Rate Register (all departments and their rate cards in one workbook).** On **Departments & Institutions**, **Import rate register** reads the register (`Department Master` + `Department Rate Register` sheets) and shows what will change before anything is saved. **Export rate register** downloads the current data in the same layout. You can edit that file and import it back. Every upload screen (register, departments, institutions, rate cards, duty sheets) follows the same rule:
+- rows that match what is saved are left alone;
+- only changed departments, rates or duties are updated, and new ones are added;
+- nothing is removed because it is missing from the sheet, and blank cells never clear a saved value;
+- a changed rate becomes a new version from the chosen date, so earlier duties and bills keep their rate. A duty already on an approved bill is not changed (it is reported as locked).
+
+**Rate card per department:** the **Rate card** button on each department lists vehicle, package, type (per km/hr or fixed), base fare, included km/hrs, extra km/hr, night charge and slot, driver allowance and tax. **Add rate** and **✎** create a new version from a date; **🗑** stops a rate after a last day and keeps its history. A plain "GST 18%" becomes IGST or CGST+SGST from the billing registration (DELHI/HR/UP GST) and the department's GSTIN state.
+
 ## 7. Verification performed
 
 * `npm test` — **41 passed, 1 skipped** (the DRI comparison, which needs the fixture below):

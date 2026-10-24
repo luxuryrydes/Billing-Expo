@@ -151,3 +151,54 @@ export async function assertDutyEditable(db: Db, dutyId: string): Promise<Record
   }
   return row;
 }
+
+// --- Re-importing a duty sheet ------------------------------------------------------------
+
+/** Fields compared when the same duty arrives again; the source reference (file/row) does not count. */
+const MATCH_FIELDS = ['dutyDate', 'vendorName', 'vehicleCategoryId', 'vehicleRegNo', 'vehicleModel', 'driverName', 'fieldOfficer', 'dutyTypeCode', 'startKm', 'endKm', 'startAt', 'endAt', 'toll', 'parking', 'otherCharges', 'remarks'] as const;
+const COL_OF: Record<(typeof MATCH_FIELDS)[number], string> = {
+  dutyDate: 'duty_date', vendorName: 'vendor_name', vehicleCategoryId: 'vehicle_category_id', vehicleRegNo: 'vehicle_reg_no', vehicleModel: 'vehicle_model', driverName: 'driver_name',
+  fieldOfficer: 'field_officer', dutyTypeCode: 'duty_type_code', startKm: 'start_km', endKm: 'end_km', startAt: 'start_at', endAt: 'end_at', toll: 'toll_amount', parking: 'parking_amount',
+  otherCharges: 'other_charges', remarks: 'remarks',
+};
+const cmp = (f: string, v: unknown): string | null => {
+  if (v == null || v === '') return null;
+  if (f === 'startAt' || f === 'endAt') return String(v).replace('T', ' ').slice(0, 16);
+  if (f === 'dutyDate') return String(v).slice(0, 10);
+  if (/Km$|toll|parking|otherCharges/.test(f)) return String(Number(v));
+  return String(v).trim();
+};
+
+/**
+ * Finds the saved duty an imported row describes: same contract, vehicle and date, and the same
+ * starting time (or starting km). Duties already matched in this import are not matched again, so
+ * a row repeated within one sheet is still added and flagged as a duplicate.
+ */
+export async function findSameDuty(db: Db, d: DutyInputT, taken: Set<string>) {
+  const rows = await db.query<Record<string, unknown>>(
+    `SELECT * FROM duties WHERE contract_id = $1 AND vehicle_reg_key = $2 AND duty_date = $3 AND status <> 'void' ORDER BY created_at`,
+    [d.contractId, regKey(d.vehicleRegNo), d.dutyDate],
+  );
+  const free = rows.filter((r) => !taken.has(String(r.id)));
+  if (d.startAt) return free.find((r) => cmp('startAt', r.start_at) === d.startAt) ?? null;
+  if (d.startKm != null) return free.find((r) => cmp('startKm', r.start_km) === cmp('startKm', d.startKm)) ?? null;
+  return free.length === 1 && rows.length === 1 ? free[0]! : null;
+}
+
+/**
+ * Compares an imported row with the saved duty. Blank cells keep the saved value; returns the
+ * merged duty and the fields that really changed.
+ */
+export function mergeDuty(existing: Record<string, unknown>, d: DutyInputT): { merged: DutyInputT; changes: { field: string; from: string | null; to: string | null }[] } {
+  const merged: Record<string, unknown> = { ...d, id: String(existing.id) };
+  const changes: { field: string; from: string | null; to: string | null }[] = [];
+  for (const f of MATCH_FIELDS) {
+    const was = cmp(f, existing[COL_OF[f]]);
+    const now = cmp(f, d[f]);
+    if (now === null) { merged[f] = f === 'startAt' || f === 'endAt' ? was : (existing[COL_OF[f]] ?? null); continue; }
+    if (now !== was) changes.push({ field: f, from: was, to: now });
+  }
+  merged.customFields = { ...((existing.custom_fields as object) ?? {}), ...(d.customFields ?? {}) };
+  merged.supportingDocRef = d.supportingDocRef ?? existing.supporting_doc_ref ?? null;
+  return { merged: merged as DutyInputT, changes };
+}

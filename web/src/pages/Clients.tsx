@@ -5,6 +5,7 @@ import { api, qs } from '../api';
 import { useAuth } from '../auth';
 import { ErrorBox, Field, Loading, Modal, PageHead, Status, Tabs, useAction } from '../components/ui';
 import { ImportDialog } from '../components/ImportDialog';
+import { RateCardDialog, RegisterImportDialog } from '../components/RateCard';
 import { DocumentList, DocumentUploader } from '../components/DocumentUploader';
 import { d } from '../format';
 import { ContractForm } from './Contracts';
@@ -98,6 +99,8 @@ export function ClientsPage() {
   const counts = useQuery({ queryKey: ['master-counts'], queryFn: async () => ({ d: (await api.get<any[]>('/master/departments')).length, i: (await api.get<any[]>('/master/institutions')).length }) });
   const [edit, setEdit] = useState<any>(null);
   const [importing, setImporting] = useState(false);
+  const [register, setRegister] = useState(false);
+  const [card, setCard] = useState<any>(null);
   const isInst = tab === 'institutions';
   const rows = q.data ?? [];
   return (
@@ -111,6 +114,9 @@ export function ClientsPage() {
         {can('client.write') && <button className="btn" onClick={() => setImporting(true)}>Import Excel</button>}
         <a className="btn" href={`/api/imports/${tab}/template.xlsx`}>Download template</a>
         {can('export') && <a className="btn" href={`/api/imports/${tab}/export.xlsx`}>Download current list</a>}
+        <span className="sep" />
+        {can('rate.write') && can('client.write') && <button className="btn" onClick={() => setRegister(true)}>Import rate register</button>}
+        {can('export') && <a className="btn" href="/api/imports/register/export.xlsx" title="All departments with their current rate cards, in the register layout. Edit it and import it back: only the changes are applied.">Export rate register</a>}
         {can('client.write') && <><span className="sep" /><Link className="btn" to="/onboarding">Set up from documents</Link></>}
       </div>
       <ErrorBox error={q.error} />
@@ -129,7 +135,7 @@ export function ClientsPage() {
                 ) : (
                   <tr key={c.id}><td><Link to={`/clients/${c.id}`}>{c.name}</Link></td><td className="small">{list(c.aliases)}</td><td>{c.company}</td><td>{c.gst_label}<div className="small muted">{c.cgst_rate != null || c.igst_rate != null ? `C ${rate(c.cgst_rate) || 0} · S ${rate(c.sgst_rate) || 0} · I ${rate(c.igst_rate) || 0}` : 'rates not set'}</div></td>
                     <td className="mono small">{c.gstin}</td><td>{c.state_name}</td><td>{c.invoice_prefix}</td><td className="num">{c.contract_count}</td>
-                    <td>{can('client.write') && <button className="btn sm" onClick={() => setEdit(c)}>Edit</button>}</td></tr>
+                    <td style={{ whiteSpace: 'nowrap' }}><button className="btn sm" onClick={() => setCard(c)}>Rate card</button> {can('client.write') && <button className="btn sm" onClick={() => setEdit(c)}>Edit</button>}</td></tr>
                 ))}
                 {rows.length === 0 && <tr><td colSpan={11} className="empty">{search ? 'Nothing matches.' : `No ${tab} yet — add one, or import your Excel list.`}</td></tr>}
               </tbody>
@@ -139,6 +145,8 @@ export function ClientsPage() {
       </div>
       {edit && <Modal title={edit.id ? `Edit ${edit.name}` : `New ${isInst ? 'institution' : 'department'}`} onClose={() => setEdit(null)} wide><MasterForm entity={tab} initial={edit.id ? edit : undefined} onDone={() => setEdit(null)} /></Modal>}
       {importing && <ImportDialog entity={tab} onClose={() => setImporting(false)} onDone={() => { q.refetch(); counts.refetch(); }} />}
+      {register && <RegisterImportDialog onClose={() => setRegister(false)} onDone={() => { q.refetch(); counts.refetch(); }} />}
+      {card && <RateCardDialog clientId={card.id} clientName={card.name} onClose={() => setCard(null)} />}
     </>
   );
 }
@@ -150,6 +158,7 @@ export function ClientDetailPage() {
   const docs = useQuery({ queryKey: ['client-docs', id], queryFn: () => api.get<any[]>(`/documents${qs({ clientId: id })}`) });
   const [editing, setEditing] = useState(false);
   const [newContract, setNewContract] = useState(false);
+  const [card, setCard] = useState(false);
   const [tab, setTab] = useState<'contracts' | 'documents' | 'details'>('contracts');
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorBox error={q.error} />;
@@ -158,6 +167,7 @@ export function ClientDetailPage() {
   return (
     <>
       <PageHead title={c.name} sub={<>{isInst ? <>Institution <span className="mono">{c.code}</span></> : 'Department'} · GSTIN {c.gstin || '—'} · <Status s={c.status} /></>}>
+        <button className="btn" onClick={() => setCard(true)}>Rate card</button>
         {can('client.write') && <button className="btn" onClick={() => setEditing(true)}>Edit</button>}
         {can('client.write') && <button className="btn primary" onClick={() => setNewContract(true)}>Add contract</button>}
       </PageHead>
@@ -196,6 +206,7 @@ export function ClientDetailPage() {
         </div>
       )}
       {editing && <Modal title={`Edit ${c.name}`} onClose={() => setEditing(false)} wide><MasterForm entity={isInst ? 'institutions' : 'departments'} initial={c} onDone={() => { setEditing(false); q.refetch(); }} /></Modal>}
+      {card && <RateCardDialog clientId={c.id} clientName={c.name} onClose={() => { setCard(false); q.refetch(); }} />}
       {newContract && <Modal title="New contract" onClose={() => setNewContract(false)} wide><ContractForm initial={{ client_id: c.id }} onDone={() => { setNewContract(false); q.refetch(); }} /></Modal>}
     </>
   );

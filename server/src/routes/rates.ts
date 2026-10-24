@@ -73,6 +73,45 @@ export async function loadSchemeVersions(db: Db, contractId: string, onlyApprove
 const overlaps = (aFrom: string, aTo: string | null, bFrom: string, bTo: string | null) => aFrom <= (bTo ?? '9999-12-31') && bFrom <= (aTo ?? '9999-12-31');
 const setsIntersect = (a: string[], b: string[]) => a.length === 0 || b.length === 0 || a.some((x) => b.includes(x));
 
+/**
+ * Approves a submitted rate version (inside the caller's transaction): maker-checker, configuration
+ * check, closing the previous version of the same scheme the day before, and refusing overlaps.
+ */
+export async function approveVersion(t: Db, id: string, userId: string, note: string | null = null) {
+  const v = await t.one<{ id: string; scheme_id: string; status: string; config: unknown; effective_from: string; effective_to: string | null; vehicle_category_ids: string[]; duty_type_codes: string[]; created_by: string; submitted_by: string; clause_ref: string | null }>(
+    'SELECT * FROM rate_scheme_versions WHERE id = $1 FOR UPDATE', [id]);
+  if (!v) throw notFound('Rate version');
+  if (v.status !== 'pending_approval') throw conflict('Only versions submitted for approval can be approved');
+  if ((await getSetting<boolean>(t, 'makerChecker')) && [v.created_by, v.submitted_by].includes(userId)) throw forbidden('Maker-checker is enabled: a different user must approve this rate version.');
+  const lint = lintConfig(v.config);
+  if (lint.problems.length) throw badRequest('Configuration has problems', lint.problems);
+  // Close the previous open-ended version of the same scheme when the new one starts later.
+  const prev = await t.query<{ id: string; effective_from: string; effective_to: string | null }>(
+    `SELECT id, effective_from, effective_to FROM rate_scheme_versions WHERE scheme_id = $1 AND status = 'approved' AND id <> $2`, [v.scheme_id, id]);
+  for (const p of prev) {
+    if (p.effective_from < v.effective_from && (p.effective_to == null || p.effective_to >= v.effective_from)) {
+      const newTo = addDays(v.effective_from, -1);
+      await t.query('UPDATE rate_scheme_versions SET effective_to = $2 WHERE id = $1', [p.id, newTo]);
+      await audit(t, userId, 'rate_version', p.id, 'auto_close', { effective_to: p.effective_to }, { effective_to: newTo }, `Superseded by version ${id}`);
+    }
+  }
+  // Any remaining overlap with another approved version (same contract, same categories/duty types) would be ambiguous.
+  const contract = await t.one<{ contract_id: string }>('SELECT contract_id FROM rate_schemes WHERE id = $1', [v.scheme_id]);
+  const others = await t.query<{ id: string; name: string; version_no: number; effective_from: string; effective_to: string | null; vehicle_category_ids: string[]; duty_type_codes: string[] }>(
+    `SELECT v.id, s.name, v.version_no, v.effective_from, v.effective_to, v.vehicle_category_ids, v.duty_type_codes FROM rate_scheme_versions v JOIN rate_schemes s ON s.id = v.scheme_id
+     WHERE s.contract_id = $1 AND v.status = 'approved' AND v.id <> $2`, [contract!.contract_id, id]);
+  const clashes = others.filter(
+    (o) => overlaps(o.effective_from, o.effective_to, v.effective_from, v.effective_to) &&
+      setsIntersect(o.vehicle_category_ids ?? [], v.vehicle_category_ids ?? []) && setsIntersect(o.duty_type_codes ?? [], v.duty_type_codes ?? []) &&
+      (o.vehicle_category_ids ?? []).length === (v.vehicle_category_ids ?? []).length && (o.duty_type_codes ?? []).length === (v.duty_type_codes ?? []).length,
+  );
+  if (clashes.length) throw conflict(`Overlaps approved version(s): ${clashes.map((c) => `${c.name} v${c.version_no} (${c.effective_from} – ${c.effective_to ?? 'open'})`).join(', ')}. Adjust dates or categories.`);
+  const row = await t.one(`UPDATE rate_scheme_versions SET status='approved', approved_by=$2, approved_at=now() WHERE id=$1 RETURNING *`, [id, userId]);
+  await t.query(`INSERT INTO approvals(entity_type, entity_id, action, user_id, note) VALUES ('rate_version',$1,'approve',$2,$3)`, [id, userId, note]);
+  await audit(t, userId, 'rate_version', id, 'approve', { status: v.status }, { status: 'approved' }, note ?? undefined);
+  return row;
+}
+
 export async function rateRoutes(app: FastifyInstance) {
   const db = app.db;
 
@@ -177,40 +216,7 @@ export async function rateRoutes(app: FastifyInstance) {
   app.post('/rate-versions/:id/approve', { preHandler: perm('rate.approve') }, async (req) => {
     const { id } = req.params as { id: string };
     const note = parse(z.object({ note: optText }), req.body ?? {}).note;
-    return db.tx(async (t) => {
-      const v = await t.one<{ id: string; scheme_id: string; status: string; config: unknown; effective_from: string; effective_to: string | null; vehicle_category_ids: string[]; duty_type_codes: string[]; created_by: string; submitted_by: string; clause_ref: string | null }>(
-        'SELECT * FROM rate_scheme_versions WHERE id = $1 FOR UPDATE', [id]);
-      if (!v) throw notFound('Rate version');
-      if (v.status !== 'pending_approval') throw conflict('Only versions submitted for approval can be approved');
-      if ((await getSetting<boolean>(t, 'makerChecker')) && [v.created_by, v.submitted_by].includes(req.user!.id)) throw forbidden('Maker-checker is enabled: a different user must approve this rate version.');
-      const lint = lintConfig(v.config);
-      if (lint.problems.length) throw badRequest('Configuration has problems', lint.problems);
-      // Close the previous open-ended version of the same scheme when the new one starts later.
-      const prev = await t.query<{ id: string; effective_from: string; effective_to: string | null }>(
-        `SELECT id, effective_from, effective_to FROM rate_scheme_versions WHERE scheme_id = $1 AND status = 'approved' AND id <> $2`, [v.scheme_id, id]);
-      for (const p of prev) {
-        if (p.effective_from < v.effective_from && (p.effective_to == null || p.effective_to >= v.effective_from)) {
-          const newTo = addDays(v.effective_from, -1);
-          await t.query('UPDATE rate_scheme_versions SET effective_to = $2 WHERE id = $1', [p.id, newTo]);
-          await audit(t, req.user!.id, 'rate_version', p.id, 'auto_close', { effective_to: p.effective_to }, { effective_to: newTo }, `Superseded by version ${id}`);
-        }
-      }
-      // Any remaining overlap with another approved version (same contract, same categories/duty types) would be ambiguous.
-      const contract = await t.one<{ contract_id: string }>('SELECT contract_id FROM rate_schemes WHERE id = $1', [v.scheme_id]);
-      const others = await t.query<{ id: string; name: string; version_no: number; effective_from: string; effective_to: string | null; vehicle_category_ids: string[]; duty_type_codes: string[] }>(
-        `SELECT v.id, s.name, v.version_no, v.effective_from, v.effective_to, v.vehicle_category_ids, v.duty_type_codes FROM rate_scheme_versions v JOIN rate_schemes s ON s.id = v.scheme_id
-         WHERE s.contract_id = $1 AND v.status = 'approved' AND v.id <> $2`, [contract!.contract_id, id]);
-      const clashes = others.filter(
-        (o) => overlaps(o.effective_from, o.effective_to, v.effective_from, v.effective_to) &&
-          setsIntersect(o.vehicle_category_ids ?? [], v.vehicle_category_ids ?? []) && setsIntersect(o.duty_type_codes ?? [], v.duty_type_codes ?? []) &&
-          (o.vehicle_category_ids ?? []).length === (v.vehicle_category_ids ?? []).length && (o.duty_type_codes ?? []).length === (v.duty_type_codes ?? []).length,
-      );
-      if (clashes.length) throw conflict(`Overlaps approved version(s): ${clashes.map((c) => `${c.name} v${c.version_no} (${c.effective_from} – ${c.effective_to ?? 'open'})`).join(', ')}. Adjust dates or categories.`);
-      const row = await t.one(`UPDATE rate_scheme_versions SET status='approved', approved_by=$2, approved_at=now() WHERE id=$1 RETURNING *`, [id, req.user!.id]);
-      await t.query(`INSERT INTO approvals(entity_type, entity_id, action, user_id, note) VALUES ('rate_version',$1,'approve',$2,$3)`, [id, req.user!.id, note]);
-      await audit(t, req.user!.id, 'rate_version', id, 'approve', { status: v.status }, { status: 'approved' }, note ?? undefined);
-      return row;
-    });
+    return db.tx((t) => approveVersion(t, id, req.user!.id, note));
   });
 
   app.post('/rate-versions/:id/reject', { preHandler: perm('rate.approve') }, async (req) => {

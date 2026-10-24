@@ -18,6 +18,7 @@ import { billRoutes } from './routes/bills.js';
 import { reportRoutes } from './routes/reports.js';
 import { onboardingRoutes } from './routes/onboarding.js';
 import { importRoutes } from './routes/imports.js';
+import { rateCardRoutes } from './routes/rateCard.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -61,6 +62,7 @@ export async function buildApp(db: Db, opts: { logger?: boolean } = {}): Promise
       await reportRoutes(api);
       await onboardingRoutes(api);
       await importRoutes(api);
+      await rateCardRoutes(api);
     },
     { prefix: '/api' },
   );
