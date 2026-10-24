@@ -152,11 +152,8 @@ def image_extract(path):
         return {"method": "none", "pages": [{"page": 1, "text": "", "tables": []}], "warnings": ["OCR (Tesseract) is not available; enter values from this image manually"], "pageCount": 1}
 
 
-def main():
-    if len(sys.argv) != 2:
-        print(json.dumps({"error": "usage: extract.py <file>"}))
-        return 2
-    path = sys.argv[1]
+def extract_file(path):
+    """Reads one document and returns its pages and tables (data only, never executed)."""
     ext = os.path.splitext(path)[1].lower()
     try:
         if ext == ".pdf":
@@ -177,6 +174,14 @@ def main():
             out = {"error": f"Unsupported file type {ext}"}
     except Exception as e:
         out = {"error": f"{e.__class__.__name__}: {e}"}
+    return out
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(json.dumps({"error": "usage: extract.py <file>"}))
+        return 2
+    out = extract_file(sys.argv[1])
     # Always UTF-8, whatever the console code page (e.g. cp1252 on Windows).
     sys.stdout.buffer.write(json.dumps(out, ensure_ascii=False).encode("utf-8"))
     sys.stdout.flush()

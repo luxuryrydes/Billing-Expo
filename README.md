@@ -124,6 +124,22 @@ Optional demo dataset (a DEMO department, DEMO rates/taxes, 78 September duties,
 DATABASE_URL=data/demo-db STORAGE_DIR=data/demo-files npm run seed:demo
 ```
 
+### Deploying on Vercel
+
+`vercel.json` deploys the repository as one Vercel project with three services:
+
+| Service | Folder | Public path | Role |
+|---|---|---|---|
+| `web` | `web/` | `/` (everything else) | the React app (static; unknown paths fall back to `index.html`) |
+| `server` | `server/` | `/api/*` | the Fastify API |
+| `worker` | `worker/` | internal only | reads PDF / Excel / Word files; the server reaches it through `WORKER_URL` (service binding) |
+
+Before the first deploy, in the Vercel project settings → Environment Variables:
+- `DATABASE_URL` — a PostgreSQL connection string (e.g. Neon or Supabase). Required: the embedded database needs a disk, which Vercel Functions do not have. Set `DATABASE_SSL=true` if the provider requires TLS.
+- `ANTHROPIC_API_KEY` — optional, for AI reading of documents.
+
+Differences from running locally: uploaded files are stored in the database; uploads are limited to 4 MB per file (Vercel's request limit); scanned images cannot be OCR-read (no Tesseract); the first administrator is created on the first visit, as locally.
+
 ## 6. Operating guide
 
 1. **System Settings → Supplier profiles:** enter LR Taxi Services' legal name, address, GSTIN, PAN, bank details. Add vehicle categories (e.g. Innova, Dzire) and duty types.

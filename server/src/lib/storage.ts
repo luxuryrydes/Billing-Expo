@@ -61,11 +61,25 @@ export async function saveFile(db: Db, name: string, buf: Buffer, userId: string
   if (!fs.existsSync(abs)) fs.writeFileSync(abs, buf, { mode: 0o640 });
   const safeName = path.basename(name).replace(/[\u0000-\u001f<>:"/\\|?*]/g, '_').slice(0, 200);
   const row = await db.one<StoredFile>(
-    `INSERT INTO files(original_name, mime_type, size_bytes, sha256, storage_path, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-    [safeName, mime ?? mimeFor(ext), buf.length, hash, rel.replace(/\\/g, '/'), userId],
+    `INSERT INTO files(original_name, mime_type, size_bytes, sha256, storage_path, created_by, content)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, original_name, mime_type, size_bytes, sha256, storage_path`,
+    [safeName, mime ?? mimeFor(ext), buf.length, hash, rel.replace(/\\/g, '/'), userId, config.storeFilesInDb ? buf : null],
   );
   return row!;
+}
+
+/**
+ * Makes sure the file is on this server's disk and returns its path. Where files live in the
+ * database (Vercel), another instance may have received the upload, so it is copied down first.
+ */
+export async function localPath(db: Db, f: Pick<StoredFile, 'storage_path'>): Promise<string> {
+  const abs = filePath(f);
+  if (fs.existsSync(abs)) return abs;
+  const r = await db.one<{ content: Buffer | Uint8Array | null }>('SELECT content FROM files WHERE storage_path = $1 AND content IS NOT NULL LIMIT 1', [f.storage_path]);
+  if (!r?.content) throw new Error('The stored file is missing');
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, Buffer.from(r.content), { mode: 0o640 });
+  return abs;
 }
 
 export function filePath(f: Pick<StoredFile, 'storage_path'>): string {
@@ -75,7 +89,7 @@ export function filePath(f: Pick<StoredFile, 'storage_path'>): string {
 }
 
 export async function loadFile(db: Db, id: string): Promise<{ meta: StoredFile; buf: Buffer } | null> {
-  const meta = await db.one<StoredFile>('SELECT * FROM files WHERE id = $1', [id]);
+  const meta = await db.one<StoredFile>('SELECT id, original_name, mime_type, size_bytes, sha256, storage_path FROM files WHERE id = $1', [id]);
   if (!meta) return null;
-  return { meta, buf: fs.readFileSync(filePath(meta)) };
+  return { meta, buf: fs.readFileSync(await localPath(db, meta)) };
 }

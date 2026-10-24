@@ -23,7 +23,8 @@ const asString = (v: string) => v;
 const tsToIsoLike = (v: string) => v; // 'YYYY-MM-DD HH:MM:SS'
 
 function normalizeParams(params: unknown[] = []): unknown[] {
-  return params.map((p) => (p !== null && typeof p === 'object' && !(p instanceof Date) && !Array.isArray(p) ? JSON.stringify(p) : p));
+  // Objects go in as JSON; dates, arrays and binary data (bytea) are passed through as they are.
+  return params.map((p) => (p !== null && typeof p === 'object' && !(p instanceof Date) && !Array.isArray(p) && !(p instanceof Uint8Array) ? JSON.stringify(p) : p));
 }
 
 function fromPg(pool: pg.Pool | pg.PoolClient, isClient = false): Db {

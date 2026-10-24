@@ -4,7 +4,8 @@ import type { Db } from '../db/index.js';
 import { audit } from '../lib/audit.js';
 import { perm } from '../lib/auth.js';
 import { badRequest, notFound, optText, parse, uuid } from '../lib/http.js';
-import { checkUpload, filePath, loadFile, saveFile } from '../lib/storage.js';
+import { inBackground } from '../lib/background.js';
+import { checkUpload, loadFile, localPath, saveFile } from '../lib/storage.js';
 import { profileDocument } from '../services/profile.js';
 import { aiExtract, FIELD_LABELS, ruleExtract, runWorker, type Candidate } from '../services/extraction.js';
 
@@ -31,7 +32,7 @@ export async function runExtraction(db: Db, versionId: string, useAi = true) {
   if (!v) return;
   await db.query(`UPDATE document_versions SET extraction_status='running', extraction_error=NULL WHERE id=$1`, [versionId]);
   try {
-    const result = await runWorker(filePath(v));
+    const result = await runWorker(await localPath(db, v));
     const cats = await db.query<{ name: string }>('SELECT name FROM vehicle_categories');
     const rule = ruleExtract(result.pages, cats.map((c) => c.name));
     let ai: Awaited<ReturnType<typeof aiExtract>> = { candidates: [], questions: [], dropped: 0 };
@@ -129,7 +130,7 @@ export async function documentRoutes(app: FastifyInstance) {
       return v!;
     });
     // Extraction runs in the background; the UI polls the version status.
-    void runExtraction(db, version.id, meta.run_ai === 'true');
+    inBackground(runExtraction(db, version.id, meta.run_ai === 'true'));
     return version;
   });
 
@@ -212,7 +213,7 @@ export async function documentRoutes(app: FastifyInstance) {
     const { useAi } = parse(z.object({ useAi: z.boolean().default(true) }), req.body ?? {});
     const v = await db.one('SELECT id FROM document_versions WHERE id = $1', [id]);
     if (!v) throw notFound('Document version');
-    void runExtraction(db, id, useAi);
+    inBackground(runExtraction(db, id, useAi));
     await audit(db, req.user!.id, 'document_version', id, 'rerun_extraction');
     return { status: 'running' };
   });

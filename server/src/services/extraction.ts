@@ -8,6 +8,7 @@
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { z } from 'zod';
@@ -48,7 +49,23 @@ export const FIELD_LABELS: Record<string, string> = {
   output_column: 'Required bill column / format',
 };
 
+/** Sends the file to the worker running as its own web service (Vercel `worker` service). */
+async function runRemoteWorker(filePath: string, timeoutMs: number): Promise<WorkerResult> {
+  const res = await fetch(`${config.workerUrl.replace(/\/+$/, '')}/extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(path.basename(filePath)) },
+    body: fs.readFileSync(filePath),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await res.text();
+  let j: WorkerResult;
+  try { j = JSON.parse(text) as WorkerResult; } catch { throw new Error(`Worker returned invalid output (HTTP ${res.status}). ${text.slice(0, 300)}`); }
+  if (j.error) throw new Error(j.error);
+  return j;
+}
+
 export function runWorker(filePath: string, timeoutMs = 120_000): Promise<WorkerResult> {
+  if (config.workerUrl) return runRemoteWorker(filePath, timeoutMs);
   return new Promise((resolve, reject) => {
     if (!fs.existsSync(config.pythonBin)) {
       reject(new Error(`Python worker not found at ${config.pythonBin}. Run: python -m venv worker/.venv && worker/.venv/Scripts/pip install -r worker/requirements.txt`));

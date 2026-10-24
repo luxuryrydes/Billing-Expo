@@ -4,6 +4,10 @@ import { createDb } from './db/index.js';
 import { migrate } from './db/migrate.js';
 import { seedReferenceData } from './db/seed.js';
 
+if (config.onVercel && !/^postgres(ql)?:\/\//.test(config.databaseUrl)) {
+  // The embedded database needs a lasting disk, which Vercel Functions do not have.
+  throw new Error('DATABASE_URL must be a PostgreSQL connection string (Neon, Supabase…) — set it in the Vercel project settings.');
+}
 const db = await createDb();
 await migrate(db, (m) => console.log(m));
 await seedReferenceData(db);

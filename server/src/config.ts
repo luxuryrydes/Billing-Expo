@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
@@ -6,20 +7,28 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 dotenv.config({ path: path.join(root, '.env'), quiet: true });
 
 const env = process.env;
+/** Running as a Vercel Function: no lasting local disk, HTTPS, 4.5 MB request limit. */
+const onVercel = !!env.VERCEL;
 
 export const config = {
   root,
+  onVercel,
   port: Number(env.PORT ?? 4000),
-  host: env.HOST ?? '127.0.0.1',
+  host: env.HOST ?? (onVercel ? '0.0.0.0' : '127.0.0.1'),
   /** postgres://... for PostgreSQL/Supabase, a directory path for embedded PGlite, or memory:// */
   databaseUrl: env.DATABASE_URL ?? path.join(root, 'data', 'pglite'),
   databaseSsl: env.DATABASE_SSL === 'true',
-  storageDir: path.resolve(root, env.STORAGE_DIR ?? 'data/files'),
-  maxUploadMb: Number(env.MAX_UPLOAD_MB ?? 25),
+  /** Local copies of uploaded files. On Vercel only a temporary cache: the database holds the files. */
+  storageDir: env.STORAGE_DIR ? path.resolve(root, env.STORAGE_DIR) : onVercel ? path.join(os.tmpdir(), 'lrbill-files') : path.join(root, 'data', 'files'),
+  /** Keep file contents in the database so every server instance can read them. */
+  storeFilesInDb: env.STORE_FILES_IN_DB ? env.STORE_FILES_IN_DB === 'true' : onVercel,
+  maxUploadMb: Number(env.MAX_UPLOAD_MB ?? (onVercel ? 4 : 25)),
   sessionHours: Number(env.SESSION_HOURS ?? 12),
-  cookieSecure: env.COOKIE_SECURE === 'true',
+  cookieSecure: env.COOKIE_SECURE ? env.COOKIE_SECURE === 'true' : onVercel,
   pythonBin: env.PYTHON_BIN ?? path.join(root, 'worker', '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python'),
   workerScript: path.join(root, 'worker', 'extract.py'),
+  /** Document worker as a web service (Vercel injects this through the service binding). Empty = run Python locally. */
+  workerUrl: env.WORKER_URL ?? '',
   anthropicApiKey: env.ANTHROPIC_API_KEY ?? '',
   anthropicModel: env.ANTHROPIC_MODEL ?? 'claude-opus-5-5',
   webDist: path.join(root, 'web', 'dist'),
