@@ -1,71 +1,102 @@
-# LR Taxi Services — billing formatting, calculations and SQL paths
+# LR Taxi Services — Billing & Duty Management
 
-Source snapshot: 26 October 2026. Paths below are full paths relative to the software project root; the ZIP preserves that folder structure.
+A configurable billing platform for LR Taxi Services Pvt. Ltd.: from contract documents and approved rate rules, through daily duty entry, to department-specific Excel/PDF bills with a full calculation trace and audit history.
 
-## Start here
+**Core principle:** bill amounts come only from a deterministic, tested calculation engine applied to rules that a person has approved. Document extraction (rule-based, optionally AI) only proposes candidate terms with their source text; it never creates or approves billing rules.
 
-| Purpose | Full source path |
+---
+
+## 1. Modules
+
+| Module | What it does |
 |---|---|
-| Trip fare calculation | `src/lib/billing.ts` |
-| Build bill rows, resolve rate cards, client/vendor details and GST | `src/lib/bill-template.ts` |
-| PDF and Word bill layouts, institution-specific layouts, Excel export entry points | `src/lib/bill-export.ts` |
-| Editable Excel bill layout and live calculation formulas | `src/lib/bill-xlsx.ts` |
-| Create invoice from saved trips, invoice totals, older Excel invoice layout | `src/lib/invoice.ts` |
-| Basic invoice PDF layout, PDF merging and download | `src/lib/pdf.ts` |
-| Invoice screen, preview and export actions | `src/routes/_app/invoices.tsx` |
-| Trip entry, editing and calculations | `src/routes/_app/trips.tsx` |
-| Rate packages | `src/routes/_app/packages.tsx` |
-| Department rate cards | `src/routes/_app/departments.tsx` |
-| Institution bill templates and rate cards | `src/routes/_app/institutions.tsx` |
-| Single / bulk duty-slip entry | `src/routes/_app/upload.tsx`, `src/routes/_app/upload-bulk.tsx` |
-| Merge parsing, save and rollback | `src/routes/api/public/merge.parse.ts`, `src/routes/api/public/merge.commit.ts`, `src/routes/api/public/merge.rollback.ts` |
+| Dashboard | Live counts from the database: departments, contracts, duties today, duties with errors / awaiting verification, bills preparing / awaiting approval / generated, open exceptions, contracts with no duty yesterday, department × month totals, recent bills and documents. |
+| Set up from documents | Upload a department's contract, rate schedule and sample bill (separately or as one combined PDF), plus optionally its duty sheet. The department, contract, LR invoicing details, vehicle categories with model aliases, package rates, tax observed on the sample bill, bill-number series and bill format are read and shown with their source page for checking; on confirmation they are created, with rates, tax and format as drafts awaiting approval. |
+| Departments & Institutions | One dashboard with Departments (keyed by name: aliases, invoice prefix, default package, GST text such as "Split 2.5+2.5%", company, address, GSTIN) and Institutions (keyed by code: header title/subtitle, invoice prefix, GST mode, CGST/SGST/IGST %, vendor SAC and GSTIN, custom duty fields, terms). Add/Edit by hand or Import Excel (.xlsx/.xls/.csv): preview with sheet choice, column mapping, extra columns kept as extra fields, rows to add/update/unchanged/invalid with field-level changes, error report, all-or-nothing commit (or import valid rows only). Re-importing updates matching records and adds new ones; nothing is deleted because it is missing; blank cells never clear values. Download template / current list. Each record has its contracts and documents. |
+| Contracts | Multiple contracts per department: validity, PO/work order, billing frequency, tax mode (inclusive/exclusive), document- or line-level tax, invoice rounding, 1- or 2-level approval, bill-number format, contract-specific validation thresholds and extra duty fields. |
+| Tax rules | Per contract, effective-dated CGST/SGST/IGST/UTGST/CESS/other. No rate is assumed; a rule needs a recorded source (clause/notification) and an approver before it applies. A 0% rule records a confirmed exemption. |
+| Documents | Uploaded where they belong: on a department or contract's Documents tab (and in Set up from documents). Re-uploading a document of the same type for the same department/contract offers "Update existing document" (new version; older versions kept and restorable) or "Keep as a separate document"; identical files are flagged; documents of other departments/contracts are never offered. A Python worker reads PDF, Excel (.xlsx/.xls), Word, CSV (OCR when Tesseract is installed); candidate terms are reviewed with their source text. |
+| Rate Schemes | Versioned, effective-dated rules per contract, vehicle category and duty type. Package parameters (included km/hours, grace rule, hour/km rounding, km adjustment, night window, monthly limits) plus ordered charge components whose quantity and condition are safe formulas (e.g. `extra_km`, `max(0, total_km - monthly_included_km)`, `duty_type == 'OUTSTATION'`). Components are per duty, per vehicle-period, or per bill; charge, reimbursement or deduction; taxable or non-taxable; with optional min/max and clause reference. Draft → submit → approve; approved versions are immutable (database trigger); a new version auto-closes the previous one; overlapping approved versions are refused. Built-in test calculator shows every step. |
+| Billing Templates | Per department/contract layouts: duty rows, charge rows, or duty blocks (heading row per duty followed by package / running / extra km / extra hours / night / toll rows, as on the DRI bill); date and number styles; header fields; totals and tax-row wording; or the department's own .xlsx mapped cell-by-cell. "Import sample bill / invoice format" learns a draft from a PDF or Excel sample (a new format, or a new version of an existing one). Preview with sample data or a real bill; approval requires confirming the preview was reviewed. Versions lock on approval; bills keep the version they were approved with. |
+| Billing Export / Invoices | Invoice list with PDF/Excel downloads, date-wise bill creation, import sample bill / invoice format, invoice formats by department, import billing data (duty sheets), export billing data (bills, taxes and lines to Excel; duty register). |
+| Rate-card import | On a contract's Rate schemes tab or Rate Schemes page: Excel/CSV with any column layout (mapped by the user) or a PDF rate table. Each row is compared with the currently approved rate for the same vehicle category and package (current → incoming shown); changed or new rates become new draft versions from a chosen effective date; unchanged rows are left alone; a date that would rewrite already-approved rates is refused, so earlier duties and bills keep their rates. |
+| Daily Duty Entry | Excel-like grid per contract and date: paste blocks from Excel, Enter to move down, Ctrl+D to copy the previous row, contract-specific fields. Import wizard for Excel, CSV and PDF duty sheets with automatic heading detection and column mapping; a shared sheet is split by its Department column into each department's contract; vehicle types are matched to categories by name or alias; "?"/"-" marks are treated as blank; dry-run check, leading-zero-safe vehicle numbers, explicit handling of closing times past midnight. |
+| Duty Register | Filter by department, contract, dates, vehicle, driver, status, billing state, validation; verify in bulk; per-duty history with old → new values and correction reasons; void with reason; Excel export. |
+| Validation | Missing mandatory fields, invalid numbers/times, negative or reversed odometer, zero/high km, zero/long duration, cross-midnight handled from full date-times, duplicates and overlaps for the same vehicle, outside contract dates, unknown vehicle, unknown duty type, missing expense evidence. Warnings vs. errors are configurable per contract. Readings are never silently repaired. |
+| Billing Workspace | Step-by-step month-end: select contract and period → check eligible duties (already-billed, errors, unverified, vehicle coverage gaps) → calculate → resolve exceptions (errors must be fixed or the duty excluded with a reason; warnings need a recorded decision) → submit for review → (review) → approve (bill number assigned, everything frozen) → generate Excel + PDF + internal calculation register with automatic reconciliation → mark submitted. Statuses: Draft, Calculation pending, Validation required, Under review, Approved, Generated, Submitted (+ Superseded, Cancelled). |
+| Revisions | An approved bill is never edited. "Revise" creates revision N+1 with the same bill number; duties on the original can be corrected (with reason) while the revision is open; approving the revision supersedes the original and moves the duty links. |
+| Reports & Reconciliation | Department-wise billing summary, tax summary by bill and tax type, open-exception report, duty register export. Each bill has its calculation register and reconciliation result. |
+| Users, Audit Logs, Settings | Roles: Administrator, Billing operator, Billing reviewer, Approver, Read-only. Optional maker-checker (preparer cannot approve). Full audit log. Supplier (LR) invoice profiles, vehicle categories, duty types, vehicles, drivers, default validation thresholds. |
 
-## Calculation implemented in billing.ts
+## 2. Architecture
 
-`computeTrip(input, gst)` calculates:
+```
+web/      React 19 + TypeScript + Vite + TanStack Query  (UI)
+server/   Node.js + TypeScript + Fastify + Zod           (API, auth, workflow)
+  src/engine/     calculation engine — the single source of billed amounts
+                  decimal.js arithmetic, safe formula language, rate selection,
+                  duty/period/bill components, taxes, invoice rounding, checks
+  src/services/   duty validation & import, document extraction, render model,
+                  Excel (ExcelJS) and PDF (pdfmake) writers, billing workflow
+  migrations/     PostgreSQL schema (plain SQL)
+worker/   Python document worker (PyMuPDF, pdfplumber, openpyxl, python-docx)
+```
 
-- Days: positive explicit days, otherwise the ceiling of the trip duration in days, minimum one.
-- Multiplier: one for a fixed-price package; duty days otherwise.
-- Effective KM: maximum of actual KM and minimum KM × multiplier.
-- Extra KM: maximum of zero and effective KM − included KM × multiplier; disabled for fixed-price packages.
-- Extra hours: maximum of zero and total hours − included hours × multiplier. Fixed-price packages disable these; outstation packages with zero included hours also disable them.
-- Base amount: base fare × multiplier.
-- Night charge: night rate × overlapping night windows (or the time-only fallback). Explicit night overrides are applied. Only non-fixed, non-outstation packages charge this.
-- Driver allowance: daily allowance × multiplier, only for non-fixed, non-outstation packages.
-- Taxable amount: base + extra KM charges + extra hour charges + night charges + driver allowance.
-- GST: configured split CGST/SGST, IGST or simple GST on the taxable amount. RCM does not add GST.
-- Grand total: taxable amount + GST + parking + tolls. Parking and tolls sit outside the GST base.
-- Returned monetary figures are rounded to two decimal places.
+* **Database:** PostgreSQL / Supabase via `DATABASE_URL`, or embedded **PGlite** (the PostgreSQL engine compiled to WebAssembly) for local use and tests — same SQL and migrations.
+* **One authoritative calculation:** only `server/src/engine` computes amounts. Python is used for reading documents only. Duty-level, vehicle-period and bill-level components, then taxes, then invoice rounding; every line stores its inputs, formula, rule version and clause.
+* **Snapshots:** each calculation stores an immutable snapshot (inputs incl. rate versions, tax rules, client/supplier details and duties; outputs; SHA-256). Generated files are re-rendered from the snapshot, so a historical bill stays explainable after rates, templates or client details change.
+* **Excel ↔ PDF agreement:** both are rendered from one render model; after generation the system reads the Excel back and extracts the PDF text, and checks grand total, bill number, every vehicle number and every summary line.
+* **AI (optional):** if `ANTHROPIC_API_KEY` is set, Claude (`claude-opus-5-5`, structured output) proposes extra candidate terms. Each must quote the document; quotes that cannot be found in the page text are discarded. Document text is treated as data and the model is told to ignore instructions inside it.
+* **Security:** scrypt password hashing, httpOnly SameSite session cookie, role permissions on every endpoint, login throttling, upload type/size/signature checks (no macro formats), files stored by hash outside the web root, no secrets in frontend code, database triggers that block edits to approved bills, bill lines and approved rate versions, RLS enabled on all tables so Supabase anon/authenticated keys cannot read them directly (the server connects as owner).
 
-`invoice.ts` sums the SAVED trip amounts; it does not rerun computeTrip when creating the invoice.
+### Data model (main tables)
+`app_users, sessions, app_settings, files, supplier_profiles, clients, contracts, vehicle_categories, duty_types, vehicles, drivers, documents, document_versions, extracted_items, rate_schemes, rate_scheme_versions, tax_rules, duty_import_batches, duties, billing_templates, billing_template_versions, bills, bill_duties (one active bill per duty — partial unique index), calculation_snapshots, bill_lines, bill_tax_lines, billing_exceptions, approvals, generated_files, audit_events`. See `server/migrations/001_init.sql`.
 
-## Formatting is a separate calculation path
+## 3. Setup
 
-`bill-template.ts` rebuilds bill rows using package/rate-card values, exact units × rates, and sums the displayed rows. It can therefore differ from stored invoice totals when rates have changed. It handles fixed-price and outstation rows, saved night/driver totals, institution settings, per-user splitting and whole-rupee final rounding. Its extra-KM display uses actual KM, unlike computeTrip's minimum-KM floor.
+**Quick start:** install Node.js 20+ (and Python 3.10+ for reading PDF/Excel documents), then double-click `start-windows.bat` (on Linux/macOS run `sh start.sh`). The first run installs packages, builds the app and opens http://localhost:4000, where you create the administrator. Later runs start the app straight away. Your data is kept in the `data` folder.
 
-Institution GST modes include `include`, `show_separate` (tax displayed but excluded from the payable total), and `rcm_note` (no GST added).
+Manual setup:
 
-`bill-xlsx.ts` contains live Excel formulas: line amount = UNIT × RATE, taxable totals = SUM of line amounts, tax = ROUND(taxable × percentage / 100, 2), final total = ROUND(sum of applicable amounts, 0). Its Calculation Kit is a generic what-if sheet; it does not encode every fixed-price, outstation, minimum-KM, automatic-night or institution exception. The kit's TDS check is not the core trip billing formula. Review differences before using it as a replacement engine. No calculations have been changed in this export.
+Requirements: Node.js 20+ (tested on 24), Python 3.10+ (tested on 3.14). Optional: Tesseract OCR for scanned documents; PostgreSQL 15+ or a Supabase project.
 
-## SQL and query paths
+```bash
+npm install
+```
 
-- **`SQL-PATHS.txt`** lists every included historical billing-related SQL migration, with its original full path.
-- **`BILLING-QUERY-PATHS.md`** lists application database query calls by exact file and line, with source excerpts. Most runtime queries are client query-builder calls, not `.sql` files.
-- **`SOURCE-PATHS.txt`** lists the supplied source files.
-- **`MANIFEST.json`** records the archive scope.
+```bash
+python -m venv worker/.venv
+```
 
-Main database tables: `companies`, `packages`, `gst_settings`, `duty_slips`, `trips`, `invoices`, `invoice_trips`, `departments`, `department_rate_cards`, `institutions`, `merge_batches`. Relevant functions include `seed_default_institutions`, `current_owner` and billing-related ownership/security helpers in the historical migrations.
+```bash
+worker/.venv/Scripts/python -m pip install -r worker/requirements.txt
+```
+(On Linux/macOS use `worker/.venv/bin/python`.)
 
-The original core schema is in:
-`supabase/migrations/20260511085058_c07a4f27-b435-4365-9776-29674eba69ea.sql`.
+```bash
+cp .env.example .env
+```
 
-Core invoice creation currently generates `LR-YYMM-####` in `src/lib/invoice.ts`; a historical invoice sequence exists in SQL but this function does not use it.
+Migrations run automatically when the server starts; to run them separately:
 
-## Important scope and safety notes
+```bash
+npm run migrate
+```
 
-This is a billing SOURCE REFERENCE, not a runnable full application, current database backup, or ready-to-run consolidated schema. Imported dependencies such as the database client, auth, UI controls, OCR and Google Drive integration remain part of the original application and are not all bundled. Dependency names used by these files include `@tanstack/react-router`, `@tanstack/react-start`, `@tanstack/react-query`, `pdf-lib`, `docx`, `xlsx`, `exceljs`, `zod`, and `@lovable.dev/mcp-js`; use the matching original application's dependencies when integrating.
+## 4. Environment variables
 
-Historical migrations are copied unchanged. Some also create or alter unrelated/previously removed modules, policies, triggers or seed rows. Their presence here does not mean those modules remain active. Do NOT execute the entire migration folder against a live database or assume it is a billing-only clean installation script. These files were selected from repository SQL references; the current hosted database schema, SQL executed outside the repository, and stored row contents were not inspected or exported.
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `data/pglite` | `postgres://…` for PostgreSQL/Supabase (server-side connection string), or a folder for embedded PGlite |
+| `DATABASE_SSL` | `false` | `true` for hosted Postgres that requires TLS |
+| `STORAGE_DIR` | `data/files` | uploaded originals and generated bills |
+| `MAX_UPLOAD_MB` | `25` | upload limit |
+| `PORT`, `HOST` | `4000`, `127.0.0.1` | API / production server |
+| `SESSION_HOURS` | `12` | session lifetime |
+| `COOKIE_SECURE` | `false` | set `true` behind HTTPS |
+| `PYTHON_BIN` | `worker/.venv/...` | Python for the document worker |
+| `ANTHROPIC_API_KEY` | empty | optional AI extraction |
+| `ANTHROPIC_MODEL` | `claude-opus-5-5` | model for AI extraction |
 
 ## 5. Running
 
