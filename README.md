@@ -166,6 +166,8 @@ Differences from running locally: uploaded files are stored in the database; upl
 - nothing is removed because it is missing from the sheet, and blank cells never clear a saved value;
 - a changed rate becomes a new version from the chosen date, so earlier duties and bills keep their rate. A duty already on an approved bill is not changed (it is reported as locked).
 
+**Rate types in the register.** *Per km/hr* is a package with extras (or a per-km-only rate). *Fixed price* bills the base fare only; if a fixed row also lists extra km / hour rates it is billed as a package with those extras and the preview says so. *Monthly package* is a monthly fee billed once per vehicle per bill (extra km over the monthly allowance; extra hours over a daily allowance when the package says "/day", over a monthly total otherwise) and is not pro-rated for part months. Rows marked *Reference only* are skipped, rows without a base fare in a monthly package are refused, and the *AC Usage Rate* column is kept with the rate (and exported) but not billed until how it is charged is confirmed. Packages that differ only by day window (25/26 vs 30/31 days) get separate duty types.
+
 **Rate card per department:** the **Rate card** button on each department lists vehicle, package, type (per km/hr or fixed), base fare, included km/hrs, extra km/hr, night charge and slot, driver allowance and tax. **Add rate** and **✎** create a new version from a date; **🗑** stops a rate after a last day and keeps its history. A plain "GST 18%" becomes IGST or CGST+SGST from the billing registration (DELHI/HR/UP GST) and the department's GSTIN state.
 
 ## 7. Verification performed

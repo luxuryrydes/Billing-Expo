@@ -42,6 +42,7 @@ export const RATE_SYNONYMS: Record<string, string[]> = {
   nightStart: ['night starts', 'night start'],
   nightEnd: ['night ends', 'night end'],
   driverAllowance: ['driver allowance (₹/day)', 'driver allowance', 'driver allow'],
+  acUsage: ['ac usage rate (₹)', 'ac usage rate', 'ac usage'],
   taxLabel: ['tax label (as shown)', 'tax label', 'tax'],
   taxMode: ['tax mode'],
   cgst: ['cgst (%)', 'cgst'],
@@ -163,10 +164,11 @@ export async function analyseRegister(db: Db, wb: Workbook, o: RegisterOptions) 
 
   // --- rates --------------------------------------------------------------------------
   const rateResults: RateResult[] = [];
+  const skipped: { rowNumber: number; department: string; vehicle: string; package: string }[] = [];
   const plans = new Map<string, DeptRatePlan>();
   if (rates) {
     const m = rates.mapping;
-    type Row = { rowNumber: number; dept: string; entry: RateEntry; clientId: string | null; clientName: string; deptRes?: DeptResult };
+    type Row = { rowNumber: number; dept: string; entry: RateEntry; clientId: string | null; clientName: string; deptRes?: DeptResult; partial?: boolean };
     const rows: Row[] = [];
     for (const r of rates.rows) {
       const dept = val(r.cells, m, 'department');
@@ -174,8 +176,13 @@ export async function analyseRegister(db: Db, wb: Workbook, o: RegisterOptions) 
       if (!dept || /^\d+$/.test(dept)) continue;
       if (!vehicle) continue; // "No rate card found" placeholder rows carry no rate
       const fixedCol = val(r.cells, m, 'fixed');
+      const typeText = val(r.cells, m, 'rateType');
+      const statusText = val(r.cells, m, 'status');
+      // A reference row only points to detailed rows elsewhere; it is not a rate.
+      if (/reference/i.test(typeText) || /reference/i.test(statusText)) { skipped.push({ rowNumber: r.rowNumber, department: dept, vehicle, package: val(r.cells, m, 'package') }); continue; }
       const entry = normaliseEntry({
-        vehicle, package: val(r.cells, m, 'package'), rateType: /true|yes/i.test(fixedCol) || /fixed/i.test(val(r.cells, m, 'rateType')) ? 'fixed' : 'per_km_hr',
+        vehicle, package: val(r.cells, m, 'package'), rateType: /monthly/i.test(typeText) ? 'monthly' : /true|yes/i.test(fixedCol) || /fixed/i.test(typeText) ? 'fixed' : 'per_km_hr',
+        acUsage: val(r.cells, m, 'acUsage'),
         baseFare: val(r.cells, m, 'baseFare'), includedKm: val(r.cells, m, 'includedKm'), includedHours: val(r.cells, m, 'includedHours'), extraKm: val(r.cells, m, 'extraKm'),
         extraHour: val(r.cells, m, 'extraHour'), nightCharge: val(r.cells, m, 'nightCharge'), nightStart: val(r.cells, m, 'nightStart'), nightEnd: val(r.cells, m, 'nightEnd'),
         driverAllowance: val(r.cells, m, 'driverAllowance'), taxLabel: val(r.cells, m, 'taxLabel'), taxMode: val(r.cells, m, 'taxMode'), cgst: val(r.cells, m, 'cgst'), sgst: val(r.cells, m, 'sgst'),
@@ -189,7 +196,7 @@ export async function analyseRegister(db: Db, wb: Workbook, o: RegisterOptions) 
         clientId = hit.client?.id ?? null;
         clientName = hit.client?.name ?? dept;
       }
-      rows.push({ rowNumber: r.rowNumber, dept, entry, clientId, clientName, deptRes });
+      rows.push({ rowNumber: r.rowNumber, dept, entry, clientId, clientName, deptRes, partial: /partial/i.test(statusText) });
     }
     const byDept = new Map<string, Row[]>();
     for (const r of rows) byDept.set(r.clientId ?? `new:${nk(r.dept)}`, [...(byDept.get(r.clientId ?? `new:${nk(r.dept)}`) ?? []), r]);
@@ -207,6 +214,7 @@ export async function analyseRegister(db: Db, wb: Workbook, o: RegisterOptions) 
       const taxes: ResolvedTax[] = [];
       for (const r of list) {
         const { errors, warnings } = checkEntry(r.entry);
+        if (r.partial) warnings.push('The source marks this rate as partial: some of its rates are not confirmed.');
         if (!knownDept) errors.push(`Department "${r.dept}" is not in the software and not on the Department Master sheet — add it first.`);
         const dkey = `${r.entry.vehicle.toLowerCase()}|${r.entry.package.toLowerCase()}`;
         if (seen.has(dkey)) errors.push(`Same vehicle and package as row ${seen.get(dkey)}`);
@@ -229,6 +237,10 @@ export async function analyseRegister(db: Db, wb: Workbook, o: RegisterOptions) 
           existingFrom: ex?.effectiveFrom ?? null, changes, effectiveFrom, tax: tax.mode === 'UNRESOLVED' ? `— (${tax.reason})` : `${taxDisplay(tax)}${tax.reason ? ` · ${tax.reason}` : ''}`, dutyType: dutyTypeFor(r.entry).name,
         });
       }
+      const monthlyRows = list.filter((x) => x.entry.rateType === 'monthly').length;
+      if (monthlyRows) plan.warnings.push(`${monthlyRows} monthly package(s): each is billed once per vehicle per bill and is not pro-rated for part months.`);
+      const acRows = list.filter((x) => Number(x.entry.acUsage)).length;
+      if (acRows) plan.warnings.push(`AC usage rate on ${acRows} row(s) is kept with the rate card but not billed: how it is charged has not been confirmed.`);
       // Rates in the software that this file does not list stay as they are.
       const listed = new Set(rateResults.filter((x) => (x.clientId ?? `new:${nk(x.department)}`) === key && x.existingSchemeId).map((x) => x.existingSchemeId));
       plan.kept = current.filter((c) => !listed.has(c.schemeId)).map((c) => ({ vehicle: c.entry.vehicle, package: c.entry.package }));
@@ -248,10 +260,10 @@ export async function analyseRegister(db: Db, wb: Workbook, o: RegisterOptions) 
   const count = <T extends { action: string }>(xs: T[], a: string) => xs.filter((x) => x.action === a).length;
   return {
     sheets: { master: master?.sheet ?? null, rates: rates?.sheet ?? null },
-    departments, rates: rateResults, plans: [...plans.values()],
+    departments, rates: rateResults, skipped, plans: [...plans.values()],
     summary: {
       departments: { rows: departments.length, add: count(departments, 'add'), update: count(departments, 'update'), unchanged: count(departments, 'unchanged'), errors: count(departments, 'error') },
-      rates: { rows: rateResults.length, add: count(rateResults, 'add'), update: count(rateResults, 'update'), unchanged: count(rateResults, 'unchanged'), errors: count(rateResults, 'error') },
+      rates: { rows: rateResults.length, add: count(rateResults, 'add'), update: count(rateResults, 'update'), unchanged: count(rateResults, 'unchanged'), errors: count(rateResults, 'error'), skipped: skipped.length },
       taxChanges: [...plans.values()].filter((p) => p.taxChange).length,
     },
   };
@@ -355,7 +367,7 @@ export async function exportRegister(db: Db, onDate: string): Promise<Buffer> {
   header(dm, 6, dmHead);
   // Department Rate Register
   const rr = wb.addWorksheet('Department Rate Register');
-  const rrHead = ['S.No', 'Department / Institution', 'Original Rate Card Name', 'Vehicle', 'Package / Duty Plan', 'Rate Type', 'Base Fare (₹)', 'Included Km', 'Included Hours', 'Extra Km Rate (₹)', 'Extra Hour Rate (₹)', 'Night Charge (₹/trip)', 'Night Starts', 'Night Ends', 'Driver Allowance (₹/day)', 'Tax Label (as shown)', 'Tax Mode', 'CGST (%)', 'SGST (%)', 'IGST (%)', 'GST (%)', 'Fixed Price Package?', 'Source Screenshot', 'Rate Data Status', 'Notes', 'Effective From'];
+  const rrHead = ['S.No', 'Department / Institution', 'Original Rate Card Name', 'Vehicle', 'Package / Duty Plan', 'Rate Type', 'Base Fare (₹)', 'Included Km', 'Included Hours', 'Extra Km Rate (₹)', 'Extra Hour Rate (₹)', 'Night Charge (₹/trip)', 'Night Starts', 'Night Ends', 'Driver Allowance (₹/day)', 'Tax Label (as shown)', 'Tax Mode', 'CGST (%)', 'SGST (%)', 'IGST (%)', 'GST (%)', 'Fixed Price Package?', 'Source Screenshot', 'Rate Data Status', 'Notes', 'AC Usage Rate (₹)', 'Effective From'];
   title(rr, 'DEPARTMENT RATE REGISTER | EXPORTED FROM LR BILLING', `Rates in force on ${onDate}. One row per vehicle/package.`, rrHead.length);
   header(rr, 6, rrHead);
   let sno = 0;
@@ -373,20 +385,20 @@ export async function exportRegister(db: Db, onDate: string): Promise<Buffer> {
     dm.addRow([++dsno, c.name, others[0] ?? null, c.gst_label ?? null, c.billing_pattern ?? null, c.billing_entity ?? null, c.billing_registration ?? null,
       sourceKey, shown.length ? 'Rates available' : 'No rate card found', shown.length, vehicles || null, pkgs || null, c.gstin ?? null, null]);
     if (!shown.length) {
-      rr.addRow([++sno, c.name, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 'No rate card found', 'No rate entered in the software.', null]);
+      rr.addRow([++sno, c.name, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 'No rate card found', 'No rate entered in the software.', null, null]);
       continue;
     }
     for (const r of shown) {
       const e = r.entry;
-      const row = rr.addRow([++sno, c.name, sourceKey, e.vehicle, e.package, e.rateType === 'fixed' ? 'Fixed price' : 'Per km/hr', numOrBlank(e.baseFare), numOrBlank(e.includedKm), numOrBlank(e.includedHours),
+      const row = rr.addRow([++sno, c.name, sourceKey, e.vehicle, e.package, e.rateType === 'fixed' ? 'Fixed price' : e.rateType === 'monthly' ? 'Monthly package' : 'Per km/hr', numOrBlank(e.baseFare), numOrBlank(e.includedKm), numOrBlank(e.includedHours),
         numOrBlank(e.extraKm), numOrBlank(e.extraHour), numOrBlank(e.nightCharge), e.nightStart, e.nightEnd, numOrBlank(e.driverAllowance), e.taxLabel, e.taxMode, numOrBlank(e.cgst), numOrBlank(e.sgst),
-        numOrBlank(e.igst), numOrBlank(e.gst), e.rateType === 'fixed', e.source, 'Rate available', e.notes, r.effectiveFrom]);
+        numOrBlank(e.igst), numOrBlank(e.gst), e.rateType !== 'per_km_hr', e.source, 'Rate available', e.notes, numOrBlank(e.acUsage), r.effectiveFrom]);
       row.getCell(13).numFmt = '@';
       row.getCell(14).numFmt = '@';
     }
   }
   dm.columns.forEach((col, i) => (col.width = [6, 44, 34, 14, 20, 22, 16, 30, 16, 8, 30, 40, 18, 40][i]));
-  rr.columns.forEach((col, i) => (col.width = [6, 40, 26, 16, 28, 11, 11, 9, 9, 10, 10, 10, 9, 9, 11, 16, 14, 7, 7, 7, 7, 9, 24, 14, 30, 12][i]));
+  rr.columns.forEach((col, i) => (col.width = [6, 40, 26, 16, 28, 11, 11, 9, 9, 10, 10, 10, 9, 9, 11, 16, 14, 7, 7, 7, 7, 9, 24, 14, 30, 12, 12][i]));
   dm.views = [{ state: 'frozen', ySplit: 6 }];
   rr.views = [{ state: 'frozen', ySplit: 6 }];
   const guide = wb.addWorksheet('Guide & Notes');

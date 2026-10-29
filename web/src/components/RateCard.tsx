@@ -16,7 +16,7 @@ const TAX_MODES: [string, string][] = [
 
 const blank = {
   vehicle: '', package: '', rateType: 'per_km_hr', baseFare: '', includedKm: '', includedHours: '', extraKm: '', extraHour: '',
-  nightCharge: '', nightStart: '', nightEnd: '', driverAllowance: '', taxMode: '', gst: '', cgst: '', sgst: '', igst: '', notes: '',
+  nightCharge: '', nightStart: '', nightEnd: '', driverAllowance: '', acUsage: '', taxMode: '', gst: '', cgst: '', sgst: '', igst: '', notes: '',
 };
 const str = (v: unknown) => (v == null ? '' : String(v));
 
@@ -39,7 +39,9 @@ export function RateCardDialog({ clientId, clientName, onClose }: { clientId: st
   const { run, busy } = useAction();
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.type === 'checkbox' ? ((e.target as HTMLInputElement).checked ? 'fixed' : 'per_km_hr') : e.target.value });
   const fixed = f.rateType === 'fixed';
+  const monthly = f.rateType === 'monthly';
   const data = q.data;
+  const hasAc = !!data?.rates?.some((r: any) => r.entry.acUsage);
 
   const edit = (r: any) => {
     const e = r.entry;
@@ -78,18 +80,19 @@ export function RateCardDialog({ clientId, clientName, onClose }: { clientId: st
           </div>
           <div className="scroll">
             <table className="t">
-              <thead><tr><th>Vehicle</th><th>Package</th><th>Type</th><th className="num">Base ₹</th><th className="num">Inc. Km</th><th className="num">Inc. Hrs</th><th className="num">Extra/Km</th><th className="num">Extra/Hr</th><th className="num">Night ₹</th><th>Night slot</th><th className="num">Driver allow. ₹/day</th><th>Tax</th><th>From</th><th /></tr></thead>
+              <thead><tr><th>Vehicle</th><th>Package</th><th>Type</th><th className="num">Base ₹</th><th className="num">Inc. Km</th><th className="num">Inc. Hrs</th><th className="num">Extra/Km</th><th className="num">Extra/Hr</th><th className="num">Night ₹</th><th>Night slot</th><th className="num">Driver allow. ₹/day</th>{hasAc && <th className="num" title="Kept with the rate; not billed yet">AC usage ₹</th>}<th>Tax</th><th>From</th><th /></tr></thead>
               <tbody>
                 {data.rates.map((r: any) => {
                   const e = r.entry;
                   return (
                     <tr key={r.schemeId} className={schemeId === r.schemeId ? 'sel' : ''}>
                       <td><b>{e.vehicle}</b></td><td>{e.package}</td>
-                      <td>{e.rateType === 'fixed' ? <span className="badge brand">Fixed</span> : 'Per km/hr'}</td>
+                      <td>{e.rateType === 'fixed' ? <span className="badge brand">Fixed</span> : e.rateType === 'monthly' ? <span className="badge ok">Monthly</span> : 'Per km/hr'}</td>
                       <td className="num">{money(e.baseFare)}</td><td className="num">{num(e.includedKm)}</td><td className="num">{num(e.includedHours)}</td>
                       <td className="num">{money(e.extraKm)}</td><td className="num">{money(e.extraHour)}</td><td className="num">{money(e.nightCharge)}</td>
                       <td className="small">{e.nightStart && e.nightEnd ? `${e.nightStart}–${e.nightEnd}` : '—'}</td>
                       <td className="num">{money(e.driverAllowance)}</td>
+                      {hasAc && <td className="num">{money(e.acUsage)}</td>}
                       <td className="small" style={{ whiteSpace: 'nowrap' }}>{r.taxShown}</td>
                       <td className="small" style={{ whiteSpace: 'nowrap' }}>{d(r.effectiveFrom)}{r.pending && <div><span className="badge warn">awaiting approval</span></div>}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>
@@ -110,10 +113,11 @@ export function RateCardDialog({ clientId, clientName, onClose }: { clientId: st
                 <h3 style={{ margin: 0 }}>{schemeId ? `Change ${f.vehicle} — ${f.package}` : 'Add rate'}</h3>
                 {schemeId && <button className="btn sm" onClick={reset}>Cancel edit</button>}
               </div>
-              <label className="row" style={{ gap: 6, margin: '8px 0' }}>
+              {monthly && <p className="small muted" style={{ margin: '8px 0' }}><b>Monthly package</b> — the base fare is a monthly fee, billed once per vehicle per bill (not pro-rated for part months); extra km are charged over the included km for the month.</p>}
+              {!monthly && <label className="row" style={{ gap: 6, margin: '8px 0' }}>
                 <input type="checkbox" checked={fixed} onChange={set('rateType')} />
                 <span><b>Fixed price package</b> <span className="small muted">— bills the base fare only; extra km/hr and night charges are ignored. Parking, tolls and taxes are still added.</span></span>
-              </label>
+              </label>}
               <div className="grid g4">
                 <Field label="Vehicle" required>
                   <input list="rc-vehicles" value={f.vehicle} onChange={set('vehicle')} placeholder="Crysta" disabled={!!schemeId} />
@@ -132,6 +136,7 @@ export function RateCardDialog({ clientId, clientName, onClose }: { clientId: st
                 <Field label="Night starts at"><input type="time" value={f.nightStart} onChange={set('nightStart')} disabled={fixed} /></Field>
                 <Field label="Night ends at"><input type="time" value={f.nightEnd} onChange={set('nightEnd')} disabled={fixed} /></Field>
                 <Field label="Driver allowance ₹ (per day)"><input value={f.driverAllowance} onChange={set('driverAllowance')} inputMode="decimal" /></Field>
+                <Field label="AC usage rate ₹" hint="Kept with the rate; not billed until its basis is confirmed"><input value={f.acUsage} onChange={set('acUsage')} inputMode="decimal" /></Field>
               </div>
               <h3>GST / Taxes</h3>
               <div className="grid g4">
@@ -248,8 +253,15 @@ export function RegisterImportDialog({ onClose, onDone, preview }: { onClose: ()
             <span className="badge ok">{s.departments.add} new departments</span><span className="badge brand">{s.departments.update} departments updated</span><span className="badge">{s.departments.unchanged} unchanged</span>
             <span className="badge ok">{s.rates.add} new rates</span><span className="badge brand">{s.rates.update} rates changed</span><span className="badge">{s.rates.unchanged} unchanged</span>
             {s.taxChanges > 0 && <span className="badge brand">{s.taxChanges} tax changes</span>}
+            {s.rates.skipped > 0 && <span className="badge" title={(p.skipped ?? []).map((x: any) => `Row ${x.rowNumber}: ${x.department} — ${x.package}`).join('\n')}>{s.rates.skipped} reference row(s) skipped</span>}
             {(s.departments.errors + s.rates.errors) > 0 && <span className="badge err">{s.departments.errors + s.rates.errors} errors</span>}
           </div>
+          {p.plans?.some((pl: any) => pl.warnings?.length) && (
+            <details style={{ marginBottom: 8 }}>
+              <summary className="small"><b>Notes for {p.plans.filter((pl: any) => pl.warnings?.length).length} department(s)</b> — monthly packages, AC usage, tax to set up</summary>
+              <ul className="small">{p.plans.filter((pl: any) => pl.warnings?.length).map((pl: any) => <li key={pl.department}><b>{pl.department}</b>: {pl.warnings.join(' ')}</li>)}</ul>
+            </details>
+          )}
           <Tabs<'changes' | 'departments' | 'rates' | 'errors'> tabs={[['changes', `What will change (${changes.length + (s.taxChanges ?? 0)})`], ['departments', `Departments (${p.departments.length})`], ['rates', `Rates (${p.rates.length})`], ['errors', `Errors (${errs.length})`]]} value={tab} onChange={setTab} />
           <div className="scroll" style={{ maxHeight: 380 }}>
             {tab === 'changes' && (
@@ -281,7 +293,7 @@ export function RegisterImportDialog({ onClose, onDone, preview }: { onClose: ()
             {tab === 'rates' && (
               <table className="t"><thead><tr><th>Row</th><th>Department</th><th>Vehicle</th><th>Package</th><th>Type</th><th className="num">Base ₹</th><th>Tax</th><th>Result</th><th>Notes</th></tr></thead>
                 <tbody>{p.rates.map((x: any) => (
-                  <tr key={x.rowNumber}><td>{x.rowNumber}</td><td>{x.clientName || x.department}</td><td>{x.vehicle}</td><td>{x.package}</td><td>{x.incoming.rateType === 'fixed' ? 'Fixed' : 'Per km/hr'}</td><td className="num">{money(x.incoming.baseFare)}</td>
+                  <tr key={x.rowNumber}><td>{x.rowNumber}</td><td>{x.clientName || x.department}</td><td>{x.vehicle}</td><td>{x.package}</td><td>{x.incoming.rateType === 'fixed' ? 'Fixed' : x.incoming.rateType === 'monthly' ? 'Monthly' : 'Per km/hr'}</td><td className="num">{money(x.incoming.baseFare)}</td>
                     <td className="small">{x.tax}</td><td><span className={`badge ${ACTION_TONE[x.action]}`}>{ACTION_LABEL[x.action]}</span></td><td className="small">{[...x.errors, ...x.warnings].join('; ')}</td></tr>
                 ))}</tbody></table>
             )}

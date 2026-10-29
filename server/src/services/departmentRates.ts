@@ -20,7 +20,8 @@ import { GST_STATES } from './profile.js';
 export interface RateEntry {
   vehicle: string;
   package: string;
-  rateType: 'per_km_hr' | 'fixed';
+  /** per_km_hr = package with extras (or per-km only); fixed = base fare only; monthly = one monthly fee per vehicle */
+  rateType: 'per_km_hr' | 'fixed' | 'monthly';
   baseFare: string | null;
   includedKm: string | null;
   includedHours: string | null;
@@ -30,6 +31,8 @@ export interface RateEntry {
   nightStart: string | null;
   nightEnd: string | null;
   driverAllowance: string | null;
+  /** AC usage rate from the register. Kept with the rate card but not billed until its basis is confirmed. */
+  acUsage: string | null;
   taxLabel: string | null;
   taxMode: string | null;          // CGST_SGST | IGST | GST | RCM | NONE | DEFAULT_UNSPECIFIED
   cgst: string | null;
@@ -41,10 +44,10 @@ export interface RateEntry {
 }
 
 /** The fields that define a rate; source and notes do not count as a change. */
-export const RATE_KEYS: (keyof RateEntry)[] = ['rateType', 'baseFare', 'includedKm', 'includedHours', 'extraKm', 'extraHour', 'nightCharge', 'nightStart', 'nightEnd', 'driverAllowance', 'taxMode', 'cgst', 'sgst', 'igst', 'gst'];
+export const RATE_KEYS: (keyof RateEntry)[] = ['rateType', 'baseFare', 'includedKm', 'includedHours', 'extraKm', 'extraHour', 'nightCharge', 'nightStart', 'nightEnd', 'driverAllowance', 'acUsage', 'taxMode', 'cgst', 'sgst', 'igst', 'gst'];
 export const ENTRY_LABELS: Record<string, string> = {
   rateType: 'Type', baseFare: 'Base fare', includedKm: 'Included km', includedHours: 'Included hrs', extraKm: 'Extra/km', extraHour: 'Extra/hr', nightCharge: 'Night charge',
-  nightStart: 'Night from', nightEnd: 'Night to', driverAllowance: 'Driver allowance/day', taxMode: 'Tax mode', cgst: 'CGST %', sgst: 'SGST %', igst: 'IGST %', gst: 'GST %',
+  nightStart: 'Night from', nightEnd: 'Night to', driverAllowance: 'Driver allowance/day', acUsage: 'AC usage rate', taxMode: 'Tax mode', cgst: 'CGST %', sgst: 'SGST %', igst: 'IGST %', gst: 'GST %',
 };
 
 const n = (v: unknown): string | null => {
@@ -66,9 +69,9 @@ export function normaliseEntry(raw: Partial<Record<keyof RateEntry, unknown>>): 
   return {
     vehicle: t(raw.vehicle) ?? '',
     package: t(raw.package) ?? '',
-    rateType: /fixed|true|yes/.test(type) ? 'fixed' : 'per_km_hr',
+    rateType: /monthly/.test(type) ? 'monthly' : /fixed|true|yes/.test(type) ? 'fixed' : 'per_km_hr',
     baseFare: n(raw.baseFare), includedKm: n(raw.includedKm), includedHours: n(raw.includedHours), extraKm: n(raw.extraKm), extraHour: n(raw.extraHour),
-    nightCharge: n(raw.nightCharge), nightStart: time(raw.nightStart), nightEnd: time(raw.nightEnd), driverAllowance: n(raw.driverAllowance),
+    nightCharge: n(raw.nightCharge), nightStart: time(raw.nightStart), nightEnd: time(raw.nightEnd), driverAllowance: n(raw.driverAllowance), acUsage: n(raw.acUsage),
     taxLabel: t(raw.taxLabel), taxMode: t(raw.taxMode)?.toUpperCase().replace(/[\s+]+/g, '_') ?? null,
     cgst: n(raw.cgst), sgst: n(raw.sgst), igst: n(raw.igst), gst: n(raw.gst), source: t(raw.source), notes: t(raw.notes),
   };
@@ -91,7 +94,7 @@ export function changedKeys(a: RateEntry | null, b: RateEntry): string[] {
 // --- package and duty type ------------------------------------------------------
 
 /** "4:30hrs/40kms" → 4.5 h; "80 kms./8 hrs duty" → 80 km, 8 h; "Outstation 250km" → outstation. */
-export function parsePackage(p: string): { km: number | null; hours: number | null; outstation: boolean } {
+export function parsePackage(p: string): { km: number | null; hours: number | null; outstation: boolean; monthly: boolean; perDay: boolean; window: string | null } {
   const s = p.toLowerCase();
   const km = /(\d+(?:\.\d+)?)\s*k(?:m|ms)?\b\.?/.exec(s);
   const hm = /(\d+)\s*:\s*(\d{2})\s*h/.exec(s) ?? null;
@@ -100,6 +103,11 @@ export function parsePackage(p: string): { km: number | null; hours: number | nu
     km: km ? Number(km[1]) : null,
     hours: hm ? Number(hm[1]) + Number(hm[2]) / 60 : h ? Number(h[1]) : null,
     outstation: /out\s*station/.test(s),
+    monthly: /monthly|per\s*month/.test(s),
+    // "12 hours/day" or "Per day": the hours are a daily allowance, not a monthly total.
+    perDay: /\/\s*day|per\s*day/.test(s),
+    // "25/26 days monthly" and "30/31 days monthly" are different packages.
+    window: (() => { const m = /(\d+)\s*\/\s*(\d+)\s*days/.exec(s); return m ? `${m[1]}_${m[2]}` : null; })(),
   };
 }
 
@@ -108,6 +116,11 @@ export function dutyTypeFor(e: RateEntry): { code: string; name: string } {
   const hrs = p.hours ?? (Number(e.includedHours) || null);
   const km = p.km ?? (Number(e.includedKm) || null);
   const slug = e.package.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 20) || 'PACKAGE';
+  // Monthly packages: the code carries the day window, km and hours so 25/26-day and 30/31-day variants stay apart.
+  if (e.rateType === 'monthly' || p.monthly) {
+    const code = ['M', p.window, km ? `${km}KM` : null, hrs ? `${String(hrs).replace('.', '_')}H` : null].filter(Boolean).join('_').slice(0, 20);
+    return { code, name: e.package };
+  }
   if (p.outstation) return { code: `OUT_${km ?? slug}`.slice(0, 20) + (km ? 'KM' : ''), name: e.package };
   if (hrs && km) return { code: `${String(hrs).replace('.', '_')}H_${km}KM`, name: `${hrs} hrs / ${km} km` };
   return { code: slug, name: e.package };
@@ -154,12 +167,30 @@ export interface ConfigOptions { hourRoundingMode: 'exact' | 'ceil' | 'floor' | 
 export function entryConfig(e: RateEntry, siblings: RateEntry[], o: ConfigOptions): { config: RateConfig; notes: string[] } {
   const notes: string[] = [];
   const p = parsePackage(e.package);
-  const extrasRow = e.rateType === 'fixed' ? siblings.find((s) => s !== e && s.rateType === 'per_km_hr' && !Number(s.baseFare) && !Number(s.includedKm) && !Number(s.includedHours) && (Number(s.extraKm) || Number(s.extraHour))) : undefined;
+  // A fixed package is billed with extras when a separate "extra km / hrs" row exists, or when the row itself lists extra rates.
+  const ownExtras = e.rateType === 'fixed' && (Number(e.extraKm) || Number(e.extraHour)) ? e : undefined;
+  // The row's own extra rates come first; a separate extras row (as on the AAI card) is used when the row has none.
+  const extrasRow = e.rateType === 'fixed' ? ownExtras ?? siblings.find((s) => s !== e && s.rateType === 'per_km_hr' && !Number(s.baseFare) && !Number(s.includedKm) && !Number(s.includedHours) && (Number(s.extraKm) || Number(s.extraHour))) : undefined;
   const comps: Record<string, unknown>[] = [];
   const params: Record<string, unknown> = { hourRounding: { mode: o.hourRoundingMode, unit: o.hourRoundingUnit }, kmRounding: { mode: 'exact', unit: '1' } };
   let model: RateConfig['billingModel'] = 'daily_package';
   const base = Number(e.baseFare ?? 0);
-  if (e.rateType === 'fixed' && !extrasRow) {
+  if (e.rateType === 'monthly') {
+    const km = p.km ?? Number(e.includedKm ?? 0);
+    const hrs = p.hours ?? Number(e.includedHours ?? 0);
+    model = 'monthly_package';
+    params.monthlyIncludedKm = String(km);
+    // "12 hours/day" is a daily allowance charged per duty; "240 hrs" is a monthly total charged per month.
+    if (p.perDay) params.includedHours = String(hrs);
+    else params.monthlyIncludedHours = String(hrs);
+    comps.push({ code: 'MONTHLY', label: e.package, scope: 'vehicle_period', quantityExpr: '1', rate: e.baseFare ?? '0', unit: 'month', taxCategory: 'taxable' });
+    if (Number(e.extraKm)) comps.push({ code: 'EXKM', label: 'Extra Kms', scope: 'vehicle_period', quantityExpr: 'max(0, total_km - monthly_included_km)', rate: e.extraKm!, unit: 'km', taxCategory: 'taxable' });
+    if (Number(e.extraHour) && hrs) {
+      if (p.perDay) comps.push({ code: 'EXHR', label: 'Extra Hrs', quantityExpr: 'extra_hours', rate: e.extraHour!, unit: 'hr', taxCategory: 'taxable' });
+      else comps.push({ code: 'EXHR', label: 'Extra Hrs', scope: 'vehicle_period', quantityExpr: 'max(0, total_hours - monthly_included_hours)', rate: e.extraHour!, unit: 'hr', taxCategory: 'taxable' });
+    }
+    notes.push(`Monthly package: ₹${e.baseFare} once per vehicle per bill for ${km} km and ${hrs} hrs${p.perDay ? ' a day' : ' a month'}; extra km at ₹${e.extraKm ?? 0}/km, extra hours at ₹${e.extraHour ?? 0}/hr. The fee is not pro-rated for part months.`);
+  } else if (e.rateType === 'fixed' && !extrasRow) {
     model = 'fixed_trip';
     comps.push({ code: 'BASE', label: e.package, quantityExpr: '1', rate: e.baseFare ?? '0', unit: 'trip', taxCategory: 'taxable' });
     notes.push('Fixed price: base fare only; extra km/hours and night charges are not added.');
@@ -171,7 +202,9 @@ export function entryConfig(e: RateEntry, siblings: RateEntry[], o: ConfigOption
     comps.push({ code: 'BASE', label: e.package, quantityExpr: '1', rate: e.baseFare ?? '0', unit: 'duty', taxCategory: 'taxable' });
     if (Number(extrasRow.extraKm)) comps.push({ code: 'EXKM', label: 'Extra Kms', quantityExpr: 'extra_km', rate: extrasRow.extraKm!, unit: 'km', taxCategory: 'taxable' });
     if (Number(extrasRow.extraHour)) comps.push({ code: 'EXHR', label: 'Extra Hrs', quantityExpr: 'extra_hours', rate: extrasRow.extraHour!, unit: 'hr', taxCategory: 'taxable' });
-    notes.push(`Package ${km} km / ${hrs} hrs at ₹${e.baseFare} with extras from the "${extrasRow.package}" row (₹${extrasRow.extraKm ?? 0}/km, ₹${extrasRow.extraHour ?? 0}/hr).`);
+    notes.push(extrasRow === e
+      ? `Marked fixed price, but the row lists extra rates: ${km} km / ${hrs} hrs at ₹${e.baseFare}, then ₹${e.extraKm ?? 0}/km and ₹${e.extraHour ?? 0}/hr beyond them.`
+      : `Package ${km} km / ${hrs} hrs at ₹${e.baseFare} with extras from the "${extrasRow.package}" row (₹${extrasRow.extraKm ?? 0}/km, ₹${extrasRow.extraHour ?? 0}/hr).`);
   } else if (!base && !Number(e.includedKm) && !Number(e.includedHours)) {
     model = 'hourly_km';
     if (Number(e.extraKm)) comps.push({ code: 'KM', label: 'Kilometre charge', quantityExpr: 'billable_km', rate: e.extraKm!, unit: 'km', taxCategory: 'taxable' });
@@ -215,6 +248,8 @@ export function checkEntry(e: RateEntry): { errors: string[]; warnings: string[]
   }
   for (const k of ['cgst', 'sgst', 'igst', 'gst'] as const) if (e[k] !== null && Number(e[k]) > 100) errors.push(`${ENTRY_LABELS[k]} must be a percentage`);
   if (!Number(e.baseFare) && !Number(e.extraKm) && !Number(e.extraHour)) errors.push('No base fare and no per-km / per-hour rate');
+  if (e.rateType === 'monthly' && !Number(e.baseFare)) errors.push('A monthly package needs a monthly base fare');
+  if (e.rateType === 'fixed' && (Number(e.extraKm) || Number(e.extraHour))) warnings.push('Marked fixed price but also lists extra km / hour rates: billed as a package with those extras beyond the included km and hours. Clear the extra rates if only the base fare should be billed.');
   const p = parsePackage(e.package);
   if (e.rateType === 'per_km_hr' && p.hours !== null && e.includedHours !== null && Number(e.includedHours) && Math.abs(p.hours - Number(e.includedHours)) > 0.001)
     warnings.push(`Package says ${p.hours} hrs but included hours is ${e.includedHours}${/:/.test(e.package) ? ' (4:30 means 4.5 hours)' : ''}`);
@@ -252,7 +287,7 @@ export interface CurrentRate { schemeId: string; schemeName: string; versionId: 
 function entryFromConfig(cfg: RateConfig, vehicle: string, pkg: string): RateEntry {
   const rate = (c: string) => cfg.components.find((x) => x.code === c)?.rate ?? null;
   return normaliseEntry({
-    vehicle, package: pkg, rateType: cfg.billingModel === 'fixed_trip' ? 'fixed' : 'per_km_hr', baseFare: rate('BASE') ?? rate('TRANSFER'), includedKm: cfg.params.includedKm, includedHours: cfg.params.includedHours,
+    vehicle, package: pkg, rateType: cfg.billingModel === 'fixed_trip' ? 'fixed' : cfg.billingModel === 'monthly_package' ? 'monthly' : 'per_km_hr', baseFare: rate('BASE') ?? rate('MONTHLY') ?? rate('TRANSFER'), includedKm: cfg.params.includedKm, includedHours: cfg.params.includedHours,
     extraKm: rate('EXKM') ?? rate('KM'), extraHour: rate('EXHR') ?? rate('HR'), nightCharge: rate('NIGHT'), nightStart: cfg.params.night.enabled ? cfg.params.night.start : null,
     nightEnd: cfg.params.night.enabled ? cfg.params.night.end : null, driverAllowance: rate('DRIVER'),
   });
@@ -412,7 +447,7 @@ export function localPackages(entries: RateEntry[]): Set<RateEntry> {
   const byVehicle = new Map<string, RateEntry[]>();
   for (const e of entries) byVehicle.set(e.vehicle.toLowerCase(), [...(byVehicle.get(e.vehicle.toLowerCase()) ?? []), e]);
   for (const list of byVehicle.values()) {
-    const cands = list.filter((e) => !parsePackage(e.package).outstation && (Number(e.baseFare) > 0));
+    const cands = list.filter((e) => e.rateType !== 'monthly' && !parsePackage(e.package).outstation && (Number(e.baseFare) > 0));
     if (!cands.length) continue;
     const hours = (e: RateEntry) => parsePackage(e.package).hours ?? Number(e.includedHours ?? 0);
     out.add(cands.sort((a, b) => hours(b) - hours(a) || Number(b.baseFare) - Number(a.baseFare))[0]);
