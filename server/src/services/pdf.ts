@@ -2,14 +2,22 @@ import { createRequire } from 'node:module';
 import type { Content, TableCell, TDocumentDefinitions } from 'pdfmake/interfaces.js';
 import type { RenderModel } from './render.js';
 
-const require = createRequire(import.meta.url);
-// pdfmake 0.2 server-side printer (CommonJS)
-const PdfPrinter = require('pdfmake') as new (fonts: unknown) => { createPdfKitDocument(def: TDocumentDefinitions): NodeJS.ReadableStream & { end(): void } };
-const vfs = require('pdfmake/build/vfs_fonts.js') as Record<string, string>;
-const font = (n: string) => Buffer.from(vfs[n], 'base64');
-const printer = new PdfPrinter({
-  Roboto: { normal: font('Roboto-Regular.ttf'), bold: font('Roboto-Medium.ttf'), italics: font('Roboto-Italic.ttf'), bolditalics: font('Roboto-MediumItalic.ttf') },
-});
+type Printer = { createPdfKitDocument(def: TDocumentDefinitions): NodeJS.ReadableStream & { end(): void } };
+let printer: Printer | null = null;
+/** pdfmake and its fonts are loaded the first time a PDF is made, so a problem with them cannot stop the server from starting. */
+function getPrinter(): Printer {
+  if (!printer) {
+    const require = createRequire(import.meta.url);
+    // pdfmake 0.2 server-side printer (CommonJS)
+    const PdfPrinter = require('pdfmake') as new (fonts: unknown) => Printer;
+    const vfs = require('pdfmake/build/vfs_fonts.js') as Record<string, string>;
+    const font = (n: string) => Buffer.from(vfs[n], 'base64');
+    printer = new PdfPrinter({
+      Roboto: { normal: font('Roboto-Regular.ttf'), bold: font('Roboto-Medium.ttf'), italics: font('Roboto-Italic.ttf'), bolditalics: font('Roboto-MediumItalic.ttf') },
+    });
+  }
+  return printer;
+}
 
 /** "Bill No" → "Bill No: "; labels that already end in punctuation ("SAC:-", "DATE :") are kept as written. */
 export const labelSep = (l: string) => (/[:\-.]\s*$/.test(l) ? `${l} ` : `${l}: `);
@@ -216,7 +224,7 @@ function chunk<T>(xs: T[], n: number): (T | string)[][] {
 
 export function renderPdf(m: RenderModel): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const doc = printer.createPdfKitDocument(buildPdfDefinition(m));
+    const doc = getPrinter().createPdfKitDocument(buildPdfDefinition(m));
     const chunks: Buffer[] = [];
     doc.on('data', (c: Buffer) => chunks.push(c));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
