@@ -7,6 +7,16 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 dotenv.config({ path: path.join(root, '.env'), quiet: true });
 
 const env = process.env;
+
+/**
+ * A folder path in DATABASE_URL is taken from the project root, like STORAGE_DIR, so every way of starting the
+ * server (npm run dev, npm start, start-windows.bat) opens the same database. PostgreSQL URLs and memory:// are kept as they are.
+ */
+function databaseUrl(value: string | undefined): string {
+  if (!value) return path.join(root, 'data', 'pglite');
+  if (/^postgres(ql)?:\/\//.test(value) || value === 'memory://') return value;
+  return path.resolve(root, value.replace(/^pglite:\/\//, ''));
+}
 /** Running as a Vercel Function: no lasting local disk, HTTPS, 4.5 MB request limit. */
 const onVercel = !!env.VERCEL;
 
@@ -16,7 +26,7 @@ export const config = {
   port: Number(env.PORT ?? 4000),
   host: env.HOST ?? (onVercel ? '0.0.0.0' : '127.0.0.1'),
   /** postgres://... for PostgreSQL/Supabase, a directory path for embedded PGlite, or memory:// */
-  databaseUrl: env.DATABASE_URL ?? path.join(root, 'data', 'pglite'),
+  databaseUrl: databaseUrl(env.DATABASE_URL),
   databaseSsl: env.DATABASE_SSL === 'true',
   /** Local copies of uploaded files. On Vercel only a temporary cache: the database holds the files. */
   storageDir: env.STORAGE_DIR ? path.resolve(root, env.STORAGE_DIR) : onVercel ? path.join(os.tmpdir(), 'lrbill-files') : path.join(root, 'data', 'files'),
