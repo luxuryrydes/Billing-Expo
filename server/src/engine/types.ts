@@ -115,6 +115,8 @@ export interface TraceInfo {
   schemeName: string;
   versionNo: number;
   capped?: string;
+  /** daily_package, fixed_trip… — lets a layout print a fixed-price duty differently. */
+  billingModel?: string;
 }
 
 export interface CalcLine {
@@ -147,6 +149,10 @@ export interface BillSettings {
   taxMode: 'exclusive' | 'inclusive';
   taxLevel: 'document' | 'line';
   invoiceRounding: 'none' | 'nearest_rupee' | 'up_rupee' | 'down_rupee';
+  /** standard (default): lines and taxes are rounded to paise. lr_exact: no intermediate rounding, total to the whole rupee. */
+  arithmetic?: 'standard' | 'lr_exact';
+  /** lr_exact only. add (default): tax is added to the total. show_separate: tax is printed but not added. rcm_note: reverse charge, no tax added. */
+  gstPresentation?: 'add' | 'show_separate' | 'rcm_note';
 }
 
 export interface CalcException {

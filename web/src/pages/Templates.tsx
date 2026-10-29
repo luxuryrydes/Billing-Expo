@@ -46,7 +46,7 @@ export function TemplatesPage() {
 
 function NewTemplate({ onClose }: { onClose: () => void }) {
   const clients = useClients();
-  const [f, setF] = useState({ client_id: '', contract_id: '', name: '', description: '' });
+  const [f, setF] = useState({ client_id: '', contract_id: '', name: '', description: '', preset: 'default', lr_arithmetic: false });
   const contracts = useContracts(f.client_id || undefined);
   const { run, busy } = useAction();
   const nav = useNavigate();
@@ -56,9 +56,24 @@ function NewTemplate({ onClose }: { onClose: () => void }) {
         <Field label="Department" required><select value={f.client_id} onChange={(e) => setF({ ...f, client_id: e.target.value })}><option value="">Select…</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
         <Field label="Contract" hint="Leave empty to use for all the department's contracts"><select value={f.contract_id} onChange={(e) => setF({ ...f, contract_id: e.target.value })}><option value="">All contracts</option>{contracts.data?.map((k) => <option key={k.id} value={k.id}>{k.reference_no}</option>)}</select></Field>
         <Field label="Name" required><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="e.g. Monthly duty bill" /></Field>
+        <Field label="Format" hint="You can still change every column, label and total afterwards.">
+          <select value={f.preset} onChange={(e) => setF({ ...f, preset: e.target.value, lr_arithmetic: e.target.value === 'lr_standard' && !!f.contract_id })}>
+            <option value="default">Standard duty bill</option>
+            <option value="lr_standard">LR Standard (merged invoice)</option>
+          </select>
+        </Field>
+        {f.preset === 'lr_standard' && (
+          <div className="panel">
+            <p className="small" style={{ marginTop: 0 }}>Letterhead box (SAC / PAN / GSTIN / bill no / date), a block per duty — <i>Duty for / Upto / Total running</i> and the extra charges — and the totals as rows of the table ending in <b>L.R TAXI SERVICES</b>. A PDF and an Excel with live formulas and a Calculation Kit sheet are produced.</p>
+            <label className="row" style={{ gap: 6 }}>
+              <input type="checkbox" checked={f.lr_arithmetic} disabled={!f.contract_id} onChange={(e) => setF({ ...f, lr_arithmetic: e.target.checked })} />
+              <span>Use the LR exact printed arithmetic on this contract <span className="small muted">{f.contract_id ? '— unit × rate and tax unrounded, total to the whole rupee. Applies to bills calculated from now on.' : '— choose one contract above to switch it.'}</span></span>
+            </label>
+          </div>
+        )}
         <div className="row end"><button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn primary" disabled={busy || !f.client_id || !f.name} onClick={async () => {
-            const t = await run(() => api.post('/templates', { ...f, contract_id: f.contract_id || null }));
+            const t = await run(() => api.post('/templates', { ...f, contract_id: f.contract_id || null, lr_arithmetic: f.preset === 'lr_standard' && !!f.contract_id && f.lr_arithmetic }));
             if (!t) return;
             const list = await api.get<any[]>(`/templates${qs({ clientId: f.client_id })}`);
             const v = list.find((x) => x.id === t.id)?.versions?.[0];
@@ -127,6 +142,11 @@ export function TemplateVersionPage() {
                   <Field label="Margins (pt) L,T,R,B"><input value={layout.page.margins.join(',')} onChange={(e) => upd((l) => (l.page.margins = e.target.value.split(',').map(Number)))} /></Field>
                 </div>
                 <Field label="Title"><input value={layout.title} onChange={(e) => upd((l) => (l.title = e.target.value))} /></Field>
+                <div className="grid g3">
+                  <Field label="Letterhead" hint="Box: client, address and custom fields on the left, header fields on the right (LR merged invoice)"><select value={layout.letterhead ?? 'standard'} onChange={(e) => upd((l) => (l.letterhead = e.target.value))}><option value="standard">Standard</option><option value="box">Bordered box</option></select></Field>
+                  <Field label="Totals"><select value={layout.totalsInTable ? 'table' : 'below'} onChange={(e) => upd((l) => (l.totalsInTable = e.target.value === 'table'))}><option value="below">Block below the table</option><option value="table">Rows of the table</option></select></Field>
+                  {layout.totalsInTable && <Field label="Brand beside the total"><input value={layout.brandLabel ?? ''} onChange={(e) => upd((l) => (l.brandLabel = e.target.value))} /></Field>}
+                </div>
                 <div className="row"><label className="check"><input type="checkbox" checked={layout.showSupplier} onChange={(e) => upd((l) => (l.showSupplier = e.target.checked))} />Supplier block</label>
                   <label className="check"><input type="checkbox" checked={layout.showClient} onChange={(e) => upd((l) => (l.showClient = e.target.checked))} />Client block</label></div>
                 <Field label="Period label" hint="Tokens: {periodStart} {periodEnd} {monthName} {year}"><input value={layout.periodLabel} onChange={(e) => upd((l) => (l.periodLabel = e.target.value))} /></Field>
@@ -144,7 +164,7 @@ export function TemplateVersionPage() {
                   <Field label="Rows"><select value={layout.rowMode} onChange={(e) => upd((l) => (l.rowMode = e.target.value))}><option value="duty">One row per duty</option><option value="line">One row per charge</option><option value="block">Duty blocks (heading + one row per charge)</option></select></Field>
                   <Field label="Sort by"><select value={layout.sortBy} onChange={(e) => upd((l) => (l.sortBy = e.target.value))}><option value="date">Date</option><option value="vehicle">Vehicle</option></select></Field>
                   {layout.rowMode !== 'block' && <Field label="Subtotals by"><select value={layout.groupBy} onChange={(e) => upd((l) => (l.groupBy = e.target.value))}><option value="none">None</option><option value="vehicle">Vehicle</option><option value="date">Date</option></select></Field>}
-                  <Field label="Dates"><select value={layout.dateFormat ?? 'dd-mm-yyyy'} onChange={(e) => upd((l) => (l.dateFormat = e.target.value))}><option value="dd-mm-yyyy">01-09-2026</option><option value="dd.mm.yyyy">01.09.2026</option><option value="dd/mm/yyyy">01/09/2026</option></select></Field>
+                  <Field label="Dates"><select value={layout.dateFormat ?? 'dd-mm-yyyy'} onChange={(e) => upd((l) => (l.dateFormat = e.target.value))}><option value="dd-mm-yyyy">01-09-2026</option><option value="dd.mm.yyyy">01.09.2026</option><option value="dd/mm/yyyy">01/09/2026</option><option value="dd.mm.yy">01.09.26</option></select></Field>
                   <Field label="Amounts"><select value={layout.numberStyle ?? 'indian'} onChange={(e) => upd((l) => (l.numberStyle = e.target.value))}><option value="indian">1,23,456.00</option><option value="plain">123456.00</option></select></Field>
                 </div>
                 {layout.rowMode === 'block' && layout.block && (

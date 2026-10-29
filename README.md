@@ -124,6 +124,14 @@ Optional demo dataset (a DEMO department, DEMO rates/taxes, 78 September duties,
 DATABASE_URL=data/demo-db STORAGE_DIR=data/demo-files npm run seed:demo
 ```
 
+### LR Standard invoice (merged-invoice format)
+
+The format of the other LR Taxi Services billing app, available per department:
+- **Billing Templates → New template → Format: LR Standard (merged invoice)** creates a template with a bordered letterhead (client, address, custom fields on the left; SAC / PAN / GSTIN / bill no / date on the right), a block per duty (`Duty for ( vehicle )`, `Upto : 80 kms/8 hrs duty`, `Total running : (km kms/h hrs)`, `Extra Hrs:`, `Extra Kms:`, night, driver allowance, `Toll Tax & Parking` under Non Taxable) and the totals as rows of the table ending in the red **L.R TAXI SERVICES** total. It goes through the normal preview-and-approve step, and every column, label and total can still be edited.
+- The PDF is A4 landscape. The Excel is A4 portrait with live formulas (`UNIT × RATE`, `SUM`, `ROUND(tax,2)`, `ROUND(total,0)`) and a **Calculation Kit** sheet; the formulas carry the calculated values, so the file reconciles before Excel recalculates. Word export and the institution-specific layouts (MHRD, CBI, RBI, CRRI, per-user and per-trip bills) are not included.
+- **Printed arithmetic** (Contract → Tax & invoice settings): *LR exact* keeps each line as unit × rate to four decimals, charges tax on the unrounded taxable sum, shows two decimals and rounds the bill total to the whole rupee, as the other app prints it; it also honours the department's GST mode (`show_separate` prints the tax without adding it, `rcm` prints `GST Under RCM(Invoice)`). The New template dialog can switch the chosen contract for you. *Standard* (the default, unchanged) rounds every line and tax to paise. Hour and km rounding and grace still come from the rate scheme; choose *exact* there to match the other app minute for minute. LR exact applies to bills calculated after the switch.
+- Fill in the supplier profile (PAN, GSTIN) and the contract's SAC code, or the right-hand header lines print empty.
+
 ### Deploying on Vercel
 
 `vercel.json` deploys the repository as one Vercel project with three services:

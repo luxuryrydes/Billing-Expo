@@ -2,15 +2,16 @@ import type { FastifyInstance } from 'fastify';
 import ExcelJS from 'exceljs';
 import { z } from 'zod';
 import { audit } from '../lib/audit.js';
-import { perm } from '../lib/auth.js';
+import { can, perm } from '../lib/auth.js';
 import { badRequest, conflict, forbidden, notFound, optText, parse, uuid } from '../lib/http.js';
 import { checkUpload, filePath, loadFile, saveFile } from '../lib/storage.js';
 import { runWorker } from '../services/extraction.js';
 import { learnFromPdf, learnFromXlsx, type LearnedTemplate } from '../services/sampleTemplate.js';
 import { calculateBill } from '../engine/bill.js';
 import { RateConfigSchema, type DutyInput } from '../engine/types.js';
-import { BLOCK_COLUMN_KEYS, buildRenderModel, defaultDutyLayout, DUTY_COLUMN_KEYS, LayoutSchema, LINE_COLUMN_KEYS, placeholders, type BillContext } from '../services/render.js';
-import { renderLayoutXlsx, renderMappedXlsx, XlsxMappingSchema } from '../services/excel.js';
+import { BLOCK_COLUMN_KEYS, buildRenderModel, defaultDutyLayout, DUTY_COLUMN_KEYS, LayoutSchema, LINE_COLUMN_KEYS, lrStandardLayout, placeholders, type BillContext } from '../services/render.js';
+import { renderMappedXlsx, XlsxMappingSchema } from '../services/excel.js';
+import { renderBillXlsx } from '../services/excelLr.js';
 import { renderPdf } from '../services/pdf.js';
 import { getSetting } from './master.js';
 import { loadBillContext } from '../services/billing.js';
@@ -63,7 +64,7 @@ export function previewContext(): BillContext {
 export async function templateRoutes(app: FastifyInstance) {
   const db = app.db;
 
-  app.get('/templates/columns', { preHandler: perm('view') }, async () => ({ duty: DUTY_COLUMN_KEYS, line: LINE_COLUMN_KEYS, block: BLOCK_COLUMN_KEYS, defaultLayout: defaultDutyLayout() }));
+  app.get('/templates/columns', { preHandler: perm('view') }, async () => ({ duty: DUTY_COLUMN_KEYS, line: LINE_COLUMN_KEYS, block: BLOCK_COLUMN_KEYS, defaultLayout: defaultDutyLayout(), lrStandardLayout: lrStandardLayout() }));
 
   app.get('/templates', { preHandler: perm('view') }, async (req) => {
     const q = req.query as { clientId?: string; contractId?: string };
@@ -77,10 +78,28 @@ export async function templateRoutes(app: FastifyInstance) {
   });
 
   app.post('/templates', { preHandler: perm('template.write') }, async (req) => {
-    const b = parse(z.object({ client_id: uuid, contract_id: uuid.nullable().optional(), name: z.string().trim().min(1), description: optText }), req.body);
+    const b = parse(z.object({
+      client_id: uuid, contract_id: uuid.nullable().optional(), name: z.string().trim().min(1), description: optText,
+      /** lr_standard = the LR Taxi Services merged-invoice format (letterhead box, duty blocks, totals in the table) */
+      preset: z.enum(['default', 'lr_standard']).default('default'),
+      /** Also switch the contract to the LR exact printed arithmetic that this format is meant to be used with. */
+      lr_arithmetic: z.boolean().default(false),
+    }), req.body);
+    if (b.lr_arithmetic) {
+      if (!b.contract_id) throw badRequest('Choose the contract whose bills should use the LR exact arithmetic');
+      if (!can(req.user, 'client.write')) throw forbidden('Changing the printed arithmetic of a contract needs the contract-edit permission');
+    }
     const row = await db.tx(async (t) => {
       const tpl = await t.one<{ id: string }>('INSERT INTO billing_templates(client_id, contract_id, name, description) VALUES ($1,$2,$3,$4) RETURNING *', [b.client_id, b.contract_id ?? null, b.name, b.description]);
-      await t.query('INSERT INTO billing_template_versions(template_id, version_no, layout, created_by) VALUES ($1, 1, $2, $3)', [tpl!.id, defaultDutyLayout(), req.user!.id]);
+      await t.query('INSERT INTO billing_template_versions(template_id, version_no, layout, created_by) VALUES ($1, 1, $2, $3)', [tpl!.id, b.preset === 'lr_standard' ? lrStandardLayout() : defaultDutyLayout(), req.user!.id]);
+      if (b.lr_arithmetic) {
+        const k = await t.one<{ client_id: string; arithmetic: string }>('SELECT client_id, arithmetic FROM contracts WHERE id = $1', [b.contract_id]);
+        if (!k || k.client_id !== b.client_id) throw badRequest('That contract belongs to a different department');
+        if (k.arithmetic !== 'lr_exact') {
+          await t.query(`UPDATE contracts SET arithmetic = 'lr_exact', updated_at = now() WHERE id = $1`, [b.contract_id]);
+          await audit(t, req.user!.id, 'contract', b.contract_id!, 'set_arithmetic', { arithmetic: k.arithmetic }, { arithmetic: 'lr_exact' });
+        }
+      }
       return tpl;
     });
     await audit(db, req.user!.id, 'template', row!.id, 'create', undefined, b);
@@ -228,7 +247,7 @@ export async function templateRoutes(app: FastifyInstance) {
       if (v.xlsx_file_id && mapping) {
         const f = (await loadFile(db, v.xlsx_file_id))!;
         buf = await renderMappedXlsx(f.buf, XlsxMappingSchema.parse(mapping), model, { ...placeholders(ctx), periodLabel: model.headerFields.find((h) => h.label === 'Period')?.value ?? '' });
-      } else buf = await renderLayoutXlsx(model);
+      } else buf = await renderBillXlsx(model);
       reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       reply.header('Content-Disposition', 'attachment; filename="template-preview.xlsx"');
     } else {

@@ -111,7 +111,7 @@ export function selectTaxRules(rules: TaxRuleInput[], periodStart: string, perio
   return { rules: active, warnings };
 }
 
-function computeTaxes(lines: CalcLine[], rules: TaxRuleInput[], settings: BillSettings) {
+function computeTaxes(lines: CalcLine[], rules: TaxRuleInput[], settings: BillSettings, exact = false) {
   const taxable = lines.filter((l) => l.taxCategory === 'taxable');
   const gross = lineTotal(taxable);
   const totalRate = rules.reduce((a, r) => a.add(dec(r.rate)), new D(0));
@@ -122,7 +122,8 @@ function computeTaxes(lines: CalcLine[], rules: TaxRuleInput[], settings: BillSe
     const rawBase = settings.taxMode === 'inclusive' ? u.mul(100).div(new D(100).add(totalRate)) : u;
     let unitTax = new D(0);
     rules.forEach((r, i) => {
-      const t = roundDp(rawBase.mul(dec(r.rate)).div(100), 2);
+      const raw = rawBase.mul(dec(r.rate)).div(100);
+      const t = exact ? raw : roundDp(raw, 2);
       perRule[i] = perRule[i].add(t);
       unitTax = unitTax.add(t);
     });
@@ -137,7 +138,9 @@ function computeTaxes(lines: CalcLine[], rules: TaxRuleInput[], settings: BillSe
     taxableBase: base.toFixed(2),
     amount: perRule[i].toFixed(2),
   }));
-  return { gross, base, taxLines };
+  // Exact arithmetic sums the unrounded taxes; the lines above only show them to the paisa.
+  const taxExact = perRule.reduce((a, t) => a.add(t), new D(0));
+  return { gross, base, taxLines, taxExact };
 }
 
 function applyInvoiceRounding(v: Dec, mode: BillSettings['invoiceRounding']): Dec {
@@ -150,6 +153,11 @@ function applyInvoiceRounding(v: Dec, mode: BillSettings['invoiceRounding']): De
 }
 
 export function calculateBill(input: BillCalcInput): BillCalcOutput {
+  // LR exact arithmetic (opt-in per contract): lines keep unit × rate to 4 decimals, tax is not rounded
+  // before it is summed, and the bill total goes to the whole rupee.
+  const exact = input.settings.arithmetic === 'lr_exact';
+  const presentation = exact ? input.settings.gstPresentation ?? 'add' : 'add';
+  const invoiceRounding = exact ? 'nearest_rupee' : input.settings.invoiceRounding;
   const exceptions: CalcException[] = [];
   const lines: CalcLine[] = [];
   const dutyResults: DutyResult[] = [];
@@ -175,7 +183,7 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
       continue;
     }
     try {
-      const r = calculateDuty(duty, sel.version);
+      const r = calculateDuty(duty, sel.version, exact);
       lines.push(...r.lines);
       dutyResults.push({ dutyId: duty.id, schemeVersionId: sel.version.id, variables: r.variables, total: lineTotal(r.lines).toFixed(2), ok: true });
       const g = byVersion.get(sel.version.id) ?? { version: sel.version, duties: [] };
@@ -218,7 +226,7 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
         const scope = base(rows);
         for (const comp of periodComps) {
           try {
-            const l = evalComponent(comp, cfg, scope, {}, { dutyId: null, vehicleRegNo: reg, version });
+            const l = evalComponent(comp, cfg, scope, {}, { dutyId: null, vehicleRegNo: reg, version, exact });
             if (l) lines.push(l);
           } catch (e) {
             exceptions.push({ dutyId: null, code: 'PERIOD_CALC_ERROR', severity: 'error', message: `${reg}: ${(e as Error).message}` });
@@ -230,7 +238,7 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
       const scope = base(duties);
       for (const comp of billComps) {
         try {
-          const l = evalComponent(comp, cfg, scope, {}, { dutyId: null, vehicleRegNo: null, version });
+          const l = evalComponent(comp, cfg, scope, {}, { dutyId: null, vehicleRegNo: null, version, exact });
           if (l) lines.push(l);
         } catch (e) {
           exceptions.push({ dutyId: null, code: 'BILL_CALC_ERROR', severity: 'error', message: (e as Error).message });
@@ -243,7 +251,8 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
   const { rules, warnings } = selectTaxRules(input.taxRules, input.periodStart, input.periodEnd);
   exceptions.push(...warnings);
   const hasTaxable = lines.some((l) => l.taxCategory === 'taxable' && !dec(l.amount).isZero());
-  if (hasTaxable && rules.length === 0) {
+  // Reverse charge: no tax is charged on the bill, so no tax rule is needed.
+  if (hasTaxable && rules.length === 0 && presentation !== 'rcm_note') {
     exceptions.push({
       dutyId: null,
       code: 'TAX_NOT_CONFIGURED',
@@ -251,11 +260,14 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
       message: 'Taxable charges exist but no approved tax rule is effective for this contract. Configure and approve the tax treatment (use a 0% rule to confirm an exemption).',
     });
   }
-  const { gross, base, taxLines } = computeTaxes(lines, rules, input.settings);
+  const { gross, base, taxLines: computedTaxLines, taxExact } = computeTaxes(lines, presentation === 'rcm_note' ? [] : rules, input.settings, exact);
+  const taxLines = computedTaxLines;
   const nonTaxable = lineTotal(lines, (l) => l.taxCategory === 'non_taxable');
-  const taxTotal = taxLines.reduce((a, t) => a.add(dec(t.amount)), new D(0));
-  const preRound = base.add(taxTotal).add(nonTaxable);
-  const grand = applyInvoiceRounding(preRound, input.settings.invoiceRounding);
+  const taxTotal = exact ? taxExact : taxLines.reduce((a, t) => a.add(dec(t.amount)), new D(0));
+  // show_separate: the tax is printed on the bill but is not part of the amount payable.
+  const taxAdded = presentation === 'add' ? taxTotal : new D(0);
+  const preRound = base.add(taxAdded).add(nonTaxable);
+  const grand = applyInvoiceRounding(preRound, invoiceRounding);
   const roundOff = grand.sub(preRound);
 
   const totals: BillTotals = {
@@ -280,12 +292,12 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
     },
     {
       name: 'Charges + reimbursements + deductions = lines',
-      ok: dec(totals.chargesTotal).add(dec(totals.reimbursementsTotal)).add(dec(totals.deductionsTotal)).eq(allLines),
+      ok: lineTotal(lines, (l) => l.kind === 'charge').add(lineTotal(lines, (l) => l.kind === 'reimbursement')).add(lineTotal(lines, (l) => l.kind === 'deduction')).eq(allLines),
       detail: allLines.toFixed(2),
     },
     {
       name: 'Grand total = taxable value + tax + non-taxable + round-off',
-      ok: base.add(taxTotal).add(nonTaxable).add(roundOff).eq(grand),
+      ok: base.add(taxAdded).add(nonTaxable).add(roundOff).eq(grand),
       detail: grand.toFixed(2),
     },
     {

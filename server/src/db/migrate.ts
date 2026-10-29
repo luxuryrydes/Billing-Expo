@@ -17,6 +17,7 @@ export const MIGRATIONS: [string, URL][] = [
   ['003_master_data.sql', new URL('../../migrations/003_master_data.sql', import.meta.url)],
   ['004_rate_register.sql', new URL('../../migrations/004_rate_register.sql', import.meta.url)],
   ['005_file_content.sql', new URL('../../migrations/005_file_content.sql', import.meta.url)],
+  ['006_lr_arithmetic.sql', new URL('../../migrations/006_lr_arithmetic.sql', import.meta.url)],
 ];
 
 export async function migrate(db: Db, log: (m: string) => void = () => {}): Promise<string[]> {

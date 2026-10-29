@@ -158,7 +158,7 @@ export function evalComponent(
   cfg: RateConfig,
   scope: Scope,
   missing: Record<string, string>,
-  ctx: { dutyId: string | null; vehicleRegNo: string | null; version: SchemeVersion },
+  ctx: { dutyId: string | null; vehicleRegNo: string | null; version: SchemeVersion; /** LR exact arithmetic: keep unit × rate to 4 decimals instead of rounding to paise */ exact?: boolean },
 ): CalcLine | null {
   const wrap = <T>(fn: () => T, what: string): T => {
     try {
@@ -182,7 +182,7 @@ export function evalComponent(
   q.used.forEach((u) => (inputs[u] = fmtVal(scope[u])));
   const qty = roundDp(q.value, comp.quantityDp, comp.quantityRoundMode as RoundMode);
   const rate = dec(comp.rate);
-  let amount = roundDp(qty.mul(rate), cfg.amountDp, cfg.amountRoundMode);
+  let amount = ctx.exact ? roundDp(qty.mul(rate), 4) : roundDp(qty.mul(rate), cfg.amountDp, cfg.amountRoundMode);
   let capped: string | undefined;
   if (comp.minAmount !== undefined && amount.lt(dec(comp.minAmount)) && !qty.isZero()) {
     capped = `raised to minimum ₹${dec(comp.minAmount).toFixed(2)}`;
@@ -195,7 +195,8 @@ export function evalComponent(
   if (comp.kind === 'deduction') amount = amount.abs().neg();
   if (amount.isZero() && !comp.showWhenZero) return null;
   const qtyStr = qty.toString();
-  const formula = `${qtyStr}${comp.unit ? ' ' + comp.unit : ''} × ₹${rate.toFixed(2)} = ₹${amount.toFixed(2)}${capped ? ` (${capped})` : ''}`;
+  const amountDigits = ctx.exact ? 4 : 2;
+  const formula = `${qtyStr}${comp.unit ? ' ' + comp.unit : ''} × ₹${rate.toFixed(2)} = ₹${amount.toFixed(amountDigits)}${capped ? ` (${capped})` : ''}`;
   return {
     dutyId: ctx.dutyId,
     vehicleRegNo: ctx.vehicleRegNo,
@@ -206,7 +207,7 @@ export function evalComponent(
     quantity: qtyStr,
     unit: comp.unit,
     rate: rate.toFixed(2),
-    amount: amount.toFixed(2),
+    amount: amount.toFixed(amountDigits),
     taxCategory: comp.taxCategory,
     trace: {
       quantityExpr: comp.quantityExpr,
@@ -218,6 +219,7 @@ export function evalComponent(
       schemeName: ctx.version.schemeName,
       versionNo: ctx.version.versionNo,
       capped,
+      billingModel: cfg.billingModel,
     },
   };
 }
@@ -229,13 +231,13 @@ export interface DutyCalcResult {
 }
 
 /** Calculates all duty-scope components for one duty under one scheme version. */
-export function calculateDuty(duty: DutyInput, version: SchemeVersion): DutyCalcResult {
+export function calculateDuty(duty: DutyInput, version: SchemeVersion, exact = false): DutyCalcResult {
   const cfg = version.config;
   const { scope, missing } = deriveDutyVariables(duty, cfg);
   const lines: CalcLine[] = [];
   for (const comp of cfg.components) {
     if (comp.scope !== 'duty') continue;
-    const line = evalComponent(comp, cfg, scope, missing, { dutyId: duty.id, vehicleRegNo: duty.vehicleRegNo, version });
+    const line = evalComponent(comp, cfg, scope, missing, { dutyId: duty.id, vehicleRegNo: duty.vehicleRegNo, version, exact });
     if (line) lines.push(line);
   }
   const variables: Record<string, string> = {};

@@ -16,7 +16,81 @@ export const labelSep = (l: string) => (/[:\-.]\s*$/.test(l) ? `${l} ` : `${l}: 
 
 const PAGE_WIDTH: Record<string, [number, number]> = { A4: [595.28, 841.89], A3: [841.89, 1190.55], LEGAL: [612, 1008] };
 
+const BRAND_RED = '#C00000';
+
+/**
+ * The LR Taxi Services merged-invoice page: a bordered letterhead (client on the left, SAC / PAN / GSTIN /
+ * bill no / date on the right), the duty table, and the totals as rows of that table ending in the brand total.
+ */
+function buildBoxPdfDefinition(m: RenderModel): TDocumentDefinitions {
+  const [w, h] = PAGE_WIDTH[m.page.size];
+  const pageW = m.page.orientation === 'landscape' ? h : w;
+  const usable = pageW - m.page.margins[0] - m.page.margins[2];
+  const totalWeight = m.columns.reduce((a, c) => a + c.width, 0);
+  // Cell padding (4 + 4) and the cell border come on top of a column's width, so take them off its share of the page.
+  const widths = m.columns.map((c) => Math.max(20, (c.width / totalWeight) * usable - 8.5));
+  const fs = m.page.fontSize;
+  const idx = (k: string) => m.columns.findIndex((c) => c.key === k);
+  const nonTaxIdx = idx('nonTaxable');
+  const amountIdx = idx('amount') >= 0 ? idx('amount') : m.columns.length - 1;
+  // Totals: the label sits in the column before the first value column (RATE); values go under Non Taxable / Amount.
+  const valueStart = Math.min(...[nonTaxIdx, amountIdx].filter((i) => i >= 0));
+  const labelIdx = Math.max(1, valueStart - 1);
+  const n = m.columns.length;
+
+  const body: TableCell[][] = [m.columns.map((c) => ({ text: c.label, style: 'th' }))];
+  for (const r of m.rows) {
+    // A duty heading row (it carries the serial number) is printed in bold.
+    const heading = r.cells[0]?.v !== '' && r.kind === 'data';
+    body.push(r.cells.map((c) => ({ text: c.v, alignment: c.align, bold: heading || r.kind !== 'data', noWrap: c.fmt === 'money' })));
+  }
+  for (const s of m.summary) {
+    const target = s.column === 'nonTaxable' && nonTaxIdx >= 0 ? nonTaxIdx : amountIdx;
+    const row: TableCell[] = [];
+    for (let i = 0; i < n; i++) {
+      if (i === 0) row.push(s.strong && m.brandLabel
+        ? { text: m.brandLabel, colSpan: labelIdx, bold: true, fontSize: fs + 2, color: BRAND_RED, margin: [0, 2, 0, 2] }
+        : { text: '', colSpan: labelIdx });
+      else if (i < labelIdx) row.push({});
+      else if (i === labelIdx) row.push({ text: s.label, alignment: 'right', bold: true });
+      else row.push({ text: i === target ? s.value : '', alignment: 'right', bold: true, noWrap: true });
+    }
+    body.push(row);
+  }
+
+  const left = m.box?.left ?? [];
+  const right = m.box?.right ?? [];
+  return {
+    pageSize: m.page.size,
+    pageOrientation: m.page.orientation,
+    pageMargins: m.page.margins,
+    defaultStyle: { font: 'Roboto', fontSize: fs },
+    info: { title: m.box?.left[1]?.text ?? m.title, creator: 'LR Billing' },
+    footer: (current: number, count: number) => ({ text: `Page ${current} of ${count}`, alignment: 'right', fontSize: 7, color: '#555', margin: [0, 8, m.page.margins[2], 0] }),
+    content: [
+      {
+        table: {
+          widths: ['*', Math.round(usable * 0.38) - 17],
+          body: [[
+            { stack: left.map((l) => ({ text: l.text, bold: !!l.bold, fontSize: l.size ?? fs, margin: [0, 0, 0, 2] as [number, number, number, number] })) },
+            { stack: right.map((t) => ({ text: t, fontSize: fs, margin: [0, 0, 0, 3] as [number, number, number, number] })) },
+          ]],
+        },
+        // One outer box, no divider between the two halves.
+        layout: { hLineWidth: () => 1, vLineWidth: (i: number) => (i === 0 || i === 2 ? 1 : 0), hLineColor: () => '#000', vLineColor: () => '#000', paddingLeft: () => 8, paddingRight: () => 8, paddingTop: () => 8, paddingBottom: () => 8 },
+        margin: [0, 0, 0, 10],
+      },
+      {
+        table: { headerRows: 1, dontBreakRows: true, widths, body },
+        layout: { hLineWidth: () => 0.5, vLineWidth: () => 0.5, hLineColor: () => '#000', vLineColor: () => '#000', paddingLeft: () => 4, paddingRight: () => 4, paddingTop: () => 3, paddingBottom: () => 3 },
+      },
+    ],
+    styles: { th: { bold: true, alignment: 'center', fillColor: '#ededed' } },
+  };
+}
+
 export function buildPdfDefinition(m: RenderModel): TDocumentDefinitions {
+  if (m.letterhead === 'box') return buildBoxPdfDefinition(m);
   const [w, h] = PAGE_WIDTH[m.page.size];
   const pageW = m.page.orientation === 'landscape' ? h : w;
   const usable = pageW - m.page.margins[0] - m.page.margins[2];

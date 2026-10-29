@@ -11,7 +11,8 @@ import { loadFile, saveFile } from '../lib/storage.js';
 import { audit } from '../lib/audit.js';
 import { loadSchemeVersions } from '../routes/rates.js';
 import { buildRenderModel, fmtDate, inr, placeholders, type BillContext, type RenderDuty } from './render.js';
-import { inspectXlsx, renderLayoutXlsx, renderMappedXlsx, renderRegisterXlsx, XlsxMappingSchema } from './excel.js';
+import { inspectXlsx, renderMappedXlsx, renderRegisterXlsx, XlsxMappingSchema } from './excel.js';
+import { renderBillXlsx } from './excelLr.js';
 import { renderPdf } from './pdf.js';
 import { runWorker } from './extraction.js';
 
@@ -93,7 +94,7 @@ export async function calculate(db: Db, billId: string, userId: string) {
     const bill = await getBill(t, billId);
     if (!EDITABLE_STATUSES.includes(bill.status)) throw conflict(`A ${bill.status} bill cannot be recalculated. Create a revision instead.`);
     const k = await t.one<Record<string, string>>('SELECT * FROM contracts WHERE id = $1', [bill.contract_id]);
-    const client = await t.one<BillContext['client']>('SELECT name, billing_address, gstin, pan, state_name, state_code FROM clients WHERE id = $1', [bill.client_id]);
+    const client = await t.one<BillContext['client']>('SELECT name, billing_address, gstin, pan, state_name, state_code, header_title, header_subtitle, gst_mode, duty_fields FROM clients WHERE id = $1', [bill.client_id]);
     const supplier = k!.supplier_profile_id
       ? await t.one<NonNullable<BillContext['supplier']>>('SELECT name, address, gstin, pan, state_name, state_code, phone, email, bank_details FROM supplier_profiles WHERE id = $1', [k!.supplier_profile_id])
       : await t.one<NonNullable<BillContext['supplier']>>('SELECT name, address, gstin, pan, state_name, state_code, phone, email, bank_details FROM supplier_profiles WHERE is_default LIMIT 1');
@@ -103,6 +104,11 @@ export async function calculate(db: Db, billId: string, userId: string) {
       id: r.id, name: r.name, taxType: r.tax_type, rate: r.rate, effectiveFrom: r.effective_from, effectiveTo: r.effective_to, status: r.status, sourceRef: r.source_ref,
     }));
     const settings: BillSettings = { taxMode: k!.tax_mode as BillSettings['taxMode'], taxLevel: k!.tax_level as BillSettings['taxLevel'], invoiceRounding: k!.invoice_rounding as BillSettings['invoiceRounding'] };
+    if (k!.arithmetic === 'lr_exact') {
+      // The LR Taxi Services merged-invoice arithmetic: exact lines and tax, whole-rupee total.
+      settings.arithmetic = 'lr_exact';
+      settings.gstPresentation = client!.gst_mode === 'show_separate' ? 'show_separate' : client!.gst_mode === 'rcm' ? 'rcm_note' : 'add';
+    }
 
     const rows = await eligibleDuties(t, bill);
     const excludedIds = new Set(bill.excluded_duties.map((e) => e.dutyId));
@@ -128,7 +134,7 @@ export async function calculate(db: Db, billId: string, userId: string) {
       period: { start: bill.period_start, end: bill.period_end },
       bill: { billDate: bill.bill_date ?? bill.period_end, revisionNo: bill.revision_no },
       client: client!, supplier: supplier ?? null,
-      contract: { id: k!.id, title: k!.title, reference_no: k!.reference_no, po_number: k!.po_number, sac_code: k!.sac_code, tax_mode: k!.tax_mode, tax_level: k!.tax_level, invoice_rounding: k!.invoice_rounding },
+      contract: { id: k!.id, title: k!.title, reference_no: k!.reference_no, po_number: k!.po_number, sac_code: k!.sac_code, tax_mode: k!.tax_mode, tax_level: k!.tax_level, invoice_rounding: k!.invoice_rounding, arithmetic: k!.arithmetic },
       settings, schemes, taxRules, duties, excluded: bill.excluded_duties,
     };
     const snap = await t.one<{ id: string }>(
@@ -208,6 +214,7 @@ export async function loadBillContext(db: Db, billId: string): Promise<BillConte
     contract: inp.contract,
     duties: inp.duties,
     output: s!.output,
+    presentation: inp.settings?.gstPresentation,
   };
 }
 
@@ -253,7 +260,7 @@ export async function generateOutputs(db: Db, billId: string, userId: string) {
   const tokens = { ...placeholders(ctx), periodLabel: model.headerFields.find((h) => h.label === 'Period')?.value ?? '' };
   const xlsx = tv.xlsx_file_id && tv.xlsx_mapping
     ? await renderMappedXlsx((await loadFile(db, tv.xlsx_file_id))!.buf, XlsxMappingSchema.parse(tv.xlsx_mapping), model, tokens)
-    : await renderLayoutXlsx(model);
+    : await renderBillXlsx(model);
   const pdf = await renderPdf(model);
 
   // Reconciliation -------------------------------------------------------

@@ -11,7 +11,7 @@ import { DocumentList, DocumentUploader } from '../components/DocumentUploader';
 
 const DEFAULT = {
   client_id: '', supplier_profile_id: null, title: '', reference_no: '', po_number: '', start_date: '', end_date: '', billing_frequency: 'monthly', status: 'draft',
-  tax_mode: 'exclusive', tax_level: 'document', invoice_rounding: 'none', approval_levels: 1, bill_no_format: '{CLIENT}/{FY}/{SEQ}', required_formats: '', special_instructions: '',
+  tax_mode: 'exclusive', tax_level: 'document', invoice_rounding: 'none', arithmetic: 'standard', approval_levels: 1, bill_no_format: '{CLIENT}/{FY}/{SEQ}', required_formats: '', special_instructions: '',
   validation: {}, custom_fields: [],
 };
 
@@ -61,6 +61,9 @@ export function ContractForm({ initial, onDone }: { initial?: any; onDone: () =>
         <Field label="Invoice rounding"><select value={f.invoice_rounding} onChange={set('invoice_rounding')}><option value="none">None</option><option value="nearest_rupee">Nearest rupee</option><option value="up_rupee">Up to rupee</option><option value="down_rupee">Down to rupee</option></select></Field>
         <Field label="Approval levels"><select value={f.approval_levels} onChange={set('approval_levels', true)}><option value={1}>Approver only</option><option value={2}>Reviewer + approver</option></select></Field>
       </div>
+      <Field label="Printed arithmetic" hint="LR exact keeps unit × rate and tax unrounded, shows two decimals and rounds the bill total to the whole rupee, as on the LR Taxi Services merged invoice. Rounding of hours and km still comes from the rate scheme. Applies to new calculations only.">
+        <select value={f.arithmetic ?? 'standard'} onChange={set('arithmetic')}><option value="standard">Standard — every line and tax rounded to paise</option><option value="lr_exact">LR exact — merged-invoice arithmetic</option></select>
+      </Field>
       <Field label="Bill number format" hint="Tokens: {CLIENT} {FY} {YYYY} {MM} {SEQ}"><input value={f.bill_no_format} onChange={set('bill_no_format')} /></Field>
       <div className="grid g2">
         <Field label="Required bill & supporting-document formats"><textarea value={f.required_formats ?? ''} onChange={set('required_formats')} /></Field>
@@ -146,6 +149,7 @@ export function ContractDetailPage() {
           <div className="panel"><h3>Invoice</h3>
             <div>Rates {k.tax_mode} of tax; tax on {k.tax_level === 'line' ? 'each line' : 'bill total'}</div>
             <div>Rounding: {k.invoice_rounding.replace('_', ' ')}</div>
+            <div>Printed arithmetic: {k.arithmetic === 'lr_exact' ? 'LR exact (merged invoice)' : 'standard'}</div>
             <div>Bill no. format: <code>{k.bill_no_format}</code></div>
             <div>Approval: {k.approval_levels === 2 ? 'reviewer + approver' : 'approver'}</div></div>
           <div className="panel"><h3>Work order / PO</h3><div>{k.po_number || '—'}</div><h3 style={{ marginTop: 10 }}>Required formats</h3><div className="pre">{k.required_formats || '—'}</div></div>

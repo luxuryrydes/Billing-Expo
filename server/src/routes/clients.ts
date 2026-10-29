@@ -42,6 +42,8 @@ const ContractSchema = z.object({
   tax_mode: z.enum(['exclusive', 'inclusive']).default('exclusive'),
   tax_level: z.enum(['document', 'line']).default('document'),
   invoice_rounding: z.enum(['none', 'nearest_rupee', 'up_rupee', 'down_rupee']).default('none'),
+  /** standard = round every line and tax to paise; lr_exact = the LR Taxi Services merged-invoice arithmetic */
+  arithmetic: z.enum(['standard', 'lr_exact']).default('standard'),
   approval_levels: z.union([z.literal(1), z.literal(2)]).default(1),
   bill_no_format: z.string().min(1).default('{CLIENT}/{YYYY}-{MM}/{SEQ}'),
   bid_no: optText,
@@ -156,7 +158,7 @@ export async function clientRoutes(app: FastifyInstance) {
       [b.client_id, b.supplier_profile_id ?? null, b.title, b.reference_no, b.po_number, b.start_date, b.end_date ?? null, b.billing_frequency, b.status, b.tax_mode, b.tax_level,
         b.invoice_rounding, b.approval_levels, b.bill_no_format, b.required_formats, b.special_instructions, b.validation, JSON.stringify(b.custom_fields)],
     );
-    await db.query('UPDATE contracts SET bid_no = $2, sac_code = $3, contract_value = $4 WHERE id = $1', [row!.id, b.bid_no, b.sac_code, b.contract_value]);
+    await db.query('UPDATE contracts SET bid_no = $2, sac_code = $3, contract_value = $4, arithmetic = $5 WHERE id = $1', [row!.id, b.bid_no, b.sac_code, b.contract_value, b.arithmetic]);
     await audit(db, req.user!.id, 'contract', row!.id, 'create', undefined, b);
     return row;
   });
@@ -172,7 +174,7 @@ export async function clientRoutes(app: FastifyInstance) {
       [id, b.client_id, b.supplier_profile_id ?? null, b.title, b.reference_no, b.po_number, b.start_date, b.end_date ?? null, b.billing_frequency, b.status,
         b.tax_mode, b.tax_level, b.invoice_rounding, b.approval_levels, b.bill_no_format, b.required_formats, b.special_instructions, b.validation, JSON.stringify(b.custom_fields)],
     );
-    await db.query('UPDATE contracts SET bid_no = $2, sac_code = $3, contract_value = $4 WHERE id = $1', [id, b.bid_no, b.sac_code, b.contract_value]);
+    await db.query('UPDATE contracts SET bid_no = $2, sac_code = $3, contract_value = $4, arithmetic = $5 WHERE id = $1', [id, b.bid_no, b.sac_code, b.contract_value, b.arithmetic]);
     await audit(db, req.user!.id, 'contract', id, 'update', before, row);
     return row;
   });

@@ -20,7 +20,8 @@ export const ColumnSchema = z.object({
 });
 export type Column = z.infer<typeof ColumnSchema>;
 
-export const SummarySchema = z.object({ label: z.string(), value: z.string() });
+/** `column` puts the value under a named column instead of the last one (e.g. toll and parking under Non Taxable). */
+export const SummarySchema = z.object({ label: z.string(), value: z.string(), column: z.enum(['amount', 'nonTaxable']).optional() });
 
 /** Wording of the rows inside a duty block. Tokens: {vehicleShort} {vehicleRegNo} {vehicleModel} {vehicleCategory} {includedKm} {includedHours} {totalKm} {totalHours} {driverName} {fieldOfficer} */
 export const BlockSchema = z.object({
@@ -34,6 +35,15 @@ export const BlockSchema = z.object({
   vehicleShortDigits: z.number().int().min(0).max(10).default(4),
   blankRowBetween: z.boolean().default(true),
   showPackageUnit: z.boolean().default(false),
+  /**
+   * The LR Taxi Services merged-invoice wording: a fixed-price duty is one heading row carrying its amount
+   * (" - Airport Drop"), a multi-day package shows "(N Days × rate = amount)" and a "Days: N - Total running…" line.
+   */
+  lrWording: z.boolean().default(false),
+  /** Wording of the running line for a multi-day duty. Tokens as above plus {days} {allowedKm}. */
+  multiDayRunningLabel: z.string().default('Days: {days} - Total running: ({totalKm} kms/{totalHours} hrs) - Allowed: {allowedKm} kms'),
+  /** Component codes in print order; other components follow in calculation order. */
+  chargeOrder: z.array(z.string()).default([]),
 });
 
 export const LayoutSchema = z.object({
@@ -44,6 +54,12 @@ export const LayoutSchema = z.object({
     fontSize: z.number().min(5).max(14).default(8),
   }).default({ size: 'A4', orientation: 'landscape', margins: [28, 28, 28, 36], fontSize: 8 }),
   title: z.string().default('TAX INVOICE'),
+  /** box = a bordered letterhead: supplier title, client, address and custom fields on the left, header fields on the right. */
+  letterhead: z.enum(['standard', 'box']).default('standard'),
+  /** Print the summary (taxable amount, tax, total) as rows inside the table instead of a block below it. */
+  totalsInTable: z.boolean().default(false),
+  /** Shown beside the total in the last row when totalsInTable is on. */
+  brandLabel: z.string().default('L.R TAXI SERVICES'),
   showSupplier: z.boolean().default(true),
   showClient: z.boolean().default(true),
   headerFields: z.array(z.object({ label: z.string(), value: z.string() })).default([
@@ -56,7 +72,7 @@ export const LayoutSchema = z.object({
   /** duty = one row per duty; line = one row per charge; block = a heading row per duty followed by one row per charge (e.g. DRI format) */
   rowMode: z.enum(['duty', 'line', 'block']).default('duty'),
   block: BlockSchema.default(BlockSchema.parse({})),
-  dateFormat: z.enum(['dd-mm-yyyy', 'dd.mm.yyyy', 'dd/mm/yyyy']).default('dd-mm-yyyy'),
+  dateFormat: z.enum(['dd-mm-yyyy', 'dd.mm.yyyy', 'dd/mm/yyyy', 'dd.mm.yy']).default('dd-mm-yyyy'),
   /** indian = 1,23,456.00; plain = 123456.00 */
   numberStyle: z.enum(['indian', 'plain']).default('indian'),
   /** Label for each tax line when a summary row uses "taxLines". Tokens: {name} {taxType} {rate} {base} */
@@ -111,7 +127,7 @@ export const DUTY_COLUMN_KEYS: Record<string, string> = {
   remarks: 'Remarks',
 };
 export const BLOCK_COLUMN_KEYS: Record<string, string> = {
-  sno: 'Serial number (on the duty heading row)', dutyDate: 'Duty date (heading row)', description: 'Description (heading, package, running, charges)',
+  sno: 'Serial number (on the duty heading row)', dutyDate: 'Duty date (heading row)', vehicleRegNo: 'Vehicle number (heading row)', description: 'Description (heading, package, running, charges)',
   unit: 'Quantity / unit', rate: 'Rate', amount: 'Amount', taxable: 'Taxable amount', nonTaxable: 'Non-taxable amount',
 };
 export const LINE_COLUMN_KEYS: Record<string, string> = {
@@ -128,22 +144,34 @@ export interface RenderDuty extends DutyInput {
 
 export interface BillContext {
   bill: { billNo: string; billDate: string; periodStart: string; periodEnd: string; revisionNo: number };
-  client: { name: string; billing_address: string; gstin: string | null; pan: string | null; state_name: string | null; state_code: string | null };
+  client: { name: string; billing_address: string; gstin: string | null; pan: string | null; state_name: string | null; state_code: string | null; header_title?: string | null; header_subtitle?: string | null; gst_mode?: string | null; duty_fields?: string[] | null };
   supplier: { name: string; address: string; gstin: string | null; pan: string | null; state_name: string | null; state_code: string | null; phone: string | null; email: string | null; bank_details: string | null } | null;
-  contract: { title: string; reference_no: string; po_number: string | null; sac_code?: string | null };
+  contract: { title: string; reference_no: string; po_number: string | null; sac_code?: string | null; arithmetic?: string | null };
   duties: RenderDuty[];
   output: BillCalcOutput;
+  /** LR exact arithmetic only: how tax is presented (add / show_separate / rcm_note). */
+  presentation?: 'add' | 'show_separate' | 'rcm_note';
 }
 
 export type Cell = { v: string; raw: string; fmt: Column['format']; align: 'left' | 'center' | 'right' };
+export type BoxLine = { text: string; bold?: boolean; size?: number };
 export interface RenderModel {
   title: string;
+  letterhead: Layout['letterhead'];
+  /** Letterhead box content when letterhead is 'box'. */
+  box: { left: BoxLine[]; right: string[] } | null;
+  totalsInTable: boolean;
+  brandLabel: string;
   supplierBlock: string[];
   clientBlock: string[];
   headerFields: { label: string; value: string }[];
   columns: Column[];
   rows: { cells: Cell[]; kind: 'data' | 'subtotal' | 'total' }[];
-  summary: { label: string; value: string; strong?: boolean }[];
+  /** `key` says what the row is (taxableValue, tax, nonTaxableTotal, grandTotal…); `taxRate` is the percentage of a tax row. */
+  summary: { label: string; value: string; strong?: boolean; column?: 'amount' | 'nonTaxable'; key?: string; taxRate?: string }[];
+  /** True when the bill uses the LR exact arithmetic, so spreadsheet formulas reproduce its numbers. */
+  exact: boolean;
+  presentation: 'add' | 'show_separate' | 'rcm_note';
   amountInWords: string | null;
   notes: string[];
   declaration: string;
@@ -169,8 +197,8 @@ export function inr(v: string | Dec): string {
 export function fmtDate(iso: string | null | undefined, style: Layout['dateFormat'] = 'dd-mm-yyyy'): string {
   if (!iso) return '';
   const [y, m, d] = iso.slice(0, 10).split('-');
-  const sep = style === 'dd.mm.yyyy' ? '.' : style === 'dd/mm/yyyy' ? '/' : '-';
-  return `${d}${sep}${m}${sep}${y}`;
+  const sep = style === 'dd.mm.yyyy' || style === 'dd.mm.yy' ? '.' : style === 'dd/mm/yyyy' ? '/' : '-';
+  return `${d}${sep}${m}${sep}${style === 'dd.mm.yy' ? y.slice(-2) : y}`;
 }
 
 interface Fmt { date: (s: string) => string; money: (s: string) => string }
@@ -369,15 +397,21 @@ export function buildRenderModel(ctx: BillContext, layoutRaw: unknown): RenderMo
     const b = layout.block;
     const keyed = (vals: Record<string, string | null | undefined>) => addRow(layout.columns.map((c) => vals[c.key] ?? null));
     const amountCols = (l: { taxCategory: string; amount: string }) => ({
-      amount: l.amount,
+      // The LR format lists toll and parking only under Non Taxable.
+      amount: b.lrWording && l.taxCategory === 'non_taxable' ? null : l.amount,
       taxable: l.taxCategory === 'taxable' ? l.amount : null,
       nonTaxable: l.taxCategory === 'non_taxable' ? l.amount : null,
     });
+    const orderOf = (code: string) => { const i = b.chargeOrder.indexOf(code); return i === -1 ? b.chargeOrder.length : i; };
     for (const d of duties) {
       sno++;
       const vars = varsById.get(d.id) ?? {};
       const lines = linesByDuty.get(d.id) ?? [];
       const reg = d.vehicleRegNo;
+      const baseLines = lines.filter((x) => x.componentCode === 'BASE');
+      const baseQty = baseLines.length ? dec(baseLines[0].quantity) : new D(1);
+      const multiDay = b.lrWording && baseQty.gt(1);
+      const fixed = b.lrWording && baseLines.length > 0 && baseLines[0].trace.billingModel === 'fixed_trip';
       const tok: Record<string, string> = {
         ...p,
         vehicleRegNo: reg,
@@ -391,13 +425,23 @@ export function buildRenderModel(ctx: BillContext, layoutRaw: unknown): RenderMo
         driverName: d.driverName ?? '',
         fieldOfficer: d.fieldOfficer ?? '',
         dutyDate: fmt.date(d.dutyDate),
+        days: baseQty.toString(),
+        allowedKm: dec(vars.included_km || '0').mul(baseQty).toString(),
       };
-      keyed({ sno: String(sno), dutyDate: d.dutyDate, description: fill(b.header, tok) });
-      for (const l of lines.filter((x) => x.componentCode === 'BASE')) {
-        keyed({ description: fill(b.packageLabel, tok), unit: b.showPackageUnit ? plainNum(l.quantity) : null, rate: plainNum(l.rate), ...amountCols(l) });
+      const heading = fill(b.header, tok) + (fixed ? ` - ${baseLines[0].label}` : '');
+      // A fixed-price duty is a single row: its charge sits on the heading row.
+      keyed({ sno: String(sno), dutyDate: d.dutyDate, vehicleRegNo: reg, description: heading, ...(fixed ? { unit: plainNum(baseLines[0].quantity), rate: plainNum(baseLines[0].rate), ...amountCols(baseLines[0]) } : {}) });
+      if (!fixed) {
+        for (const l of baseLines) {
+          const breakdown = multiDay || (b.lrWording && /outstation/i.test(`${l.trace.schemeName} ${l.label}`))
+            ? `  (${plainNum(l.quantity)} Days × ${fmt.money(l.rate)} = ${fmt.money(l.amount)})` : '';
+          keyed({ description: fill(b.packageLabel, tok) + breakdown, unit: b.showPackageUnit ? plainNum(l.quantity) : null, rate: plainNum(l.rate), ...amountCols(l) });
+        }
+        if (b.runningLabel) keyed({ description: fill(multiDay ? b.multiDayRunningLabel : b.runningLabel, tok) });
       }
-      if (b.runningLabel) keyed({ description: fill(b.runningLabel, tok) });
-      for (const l of lines.filter((x) => x.componentCode !== 'BASE' && !(b.mergeReimbursements && x.kind === 'reimbursement'))) {
+      const others = lines.filter((x) => x.componentCode !== 'BASE' && !(b.mergeReimbursements && x.kind === 'reimbursement'));
+      const ordered = b.chargeOrder.length ? others.map((l, i) => ({ l, i })).sort((x, y) => orderOf(x.l.componentCode) - orderOf(y.l.componentCode) || x.i - y.i).map((x) => x.l) : others;
+      for (const l of ordered) {
         keyed({ description: b.componentLabels[l.componentCode] ?? l.label, unit: plainNum(l.quantity), rate: plainNum(l.rate), ...amountCols(l) });
       }
       const reimb = lines.filter((x) => b.mergeReimbursements && x.kind === 'reimbursement');
@@ -463,28 +507,62 @@ export function buildRenderModel(ctx: BillContext, layoutRaw: unknown): RenderMo
 
   const t = out.totals as unknown as Record<string, string>;
   const summary: RenderModel['summary'] = [];
-  for (const s of layout.summary) {
+  // Reverse charge: no tax rows, the taxable value and the reimbursements are one non-taxable amount.
+  const rcmNote = layout.totalsInTable && ctx.presentation === 'rcm_note';
+  if (rcmNote) {
+    summary.push({ label: 'Amount (Non Taxable)', value: inr(dec(t.taxableValue).add(dec(t.nonTaxableTotal)).toFixed(2)), key: 'rcmAmount' });
+    summary.push({ label: 'GST Under RCM(Invoice)', value: '', key: 'rcmNote' });
+    summary.push({ label: 'Total Amount', value: inr(t.grandTotal), strong: true, key: 'grandTotal' });
+  }
+  for (const s of rcmNote ? [] : layout.summary) {
     if (s.value === 'taxLines') {
-      for (const tl of out.taxLines) summary.push({ label: fill(layout.taxLabel, { name: tl.name, taxType: tl.taxType, rate: plainNum(tl.rate), base: inr(tl.taxableBase) }), value: inr(tl.amount) });
+      for (const tl of out.taxLines) summary.push({ label: fill(layout.taxLabel, { name: tl.name, taxType: tl.taxType, rate: plainNum(tl.rate), base: inr(tl.taxableBase) }), value: inr(tl.amount), key: 'tax', taxRate: plainNum(tl.rate) });
     } else if (s.value.startsWith('tax:')) {
       const tl = out.taxLines.find((x) => x.taxType === s.value.slice(4));
       if (tl) summary.push({ label: fill(s.label, { ...p, rate: tl.rate }), value: inr(tl.amount) });
     } else if (s.value in t) {
       if (s.value === 'roundOff' && dec(t.roundOff).isZero()) continue;
-      summary.push({ label: fill(s.label, p), value: inr(t[s.value]), strong: s.value === 'grandTotal' });
+      summary.push({ label: fill(s.label, p), value: inr(t[s.value]), strong: s.value === 'grandTotal', key: s.value, ...(s.column ? { column: s.column } : {}) });
     } else {
       summary.push({ label: fill(s.label, p), value: fill(s.value, p) });
     }
   }
 
   const sup = ctx.supplier;
+  const joinLabel = (l: string) => (/[:\-.]\s*$/.test(l) ? `${l} ` : `${l}: `);
+  const headerFields = layout.headerFields.map((h) => ({ label: h.label, value: fill(h.value, p) }));
+  let box: RenderModel['box'] = null;
+  if (layout.letterhead === 'box') {
+    const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    const custom = (ctx.client.duty_fields ?? []).flatMap((label) => {
+      const vals = [...new Set(ctx.duties.map((d) => String((d.customFields ?? {})[slug(label)] ?? '').trim()).filter(Boolean))];
+      return vals.length ? [`${label}: ${vals.join(', ')}`] : [];
+    });
+    box = {
+      left: [
+        { text: ctx.client.header_title || sup?.name || '', bold: true, size: 11 },
+        { text: ctx.client.name, bold: true, size: 14 },
+        ...(ctx.client.header_subtitle ? [{ text: ctx.client.header_subtitle, size: 9 }] : []),
+        ...stripLeading(ctx.client.billing_address, ctx.client.name).split(/\r?\n/).map((x) => x.trim()).filter(Boolean).map((text) => ({ text, size: 9 })),
+        ...(ctx.client.gstin ? [{ text: `CLIENT GSTIN - ${ctx.client.gstin}`, size: 9 }] : []),
+        ...custom.map((text) => ({ text, bold: true, size: 9 })),
+      ],
+      right: headerFields.map((h) => `${joinLabel(h.label)}${h.value}`),
+    };
+  }
   return {
     title: fill(layout.title, p),
+    letterhead: layout.letterhead,
+    box,
+    totalsInTable: layout.totalsInTable,
+    brandLabel: layout.brandLabel,
+    exact: ctx.contract.arithmetic === 'lr_exact',
+    presentation: ctx.presentation ?? 'add',
     supplierBlock: layout.showSupplier && sup ? [sup.name, sup.address, sup.gstin ? `GSTIN: ${sup.gstin}` : '', sup.pan ? `PAN: ${sup.pan}` : '', sup.state_name ? `State: ${sup.state_name}${sup.state_code ? ` (${sup.state_code})` : ''}` : '', [sup.phone, sup.email].filter(Boolean).join(' · ')].filter(Boolean) : [],
     clientBlock: !layout.showClient ? [] : layout.clientBlockStyle === 'name_address_gstin'
       ? [ctx.client.name, stripLeading(ctx.client.billing_address, ctx.client.name), ctx.client.gstin ? `Client GSTIN: ${ctx.client.gstin}` : ''].filter(Boolean)
       : ['Bill to:', ctx.client.name, ctx.client.billing_address, ctx.client.gstin ? `GSTIN: ${ctx.client.gstin}` : '', ctx.client.state_name ? `State: ${ctx.client.state_name}${ctx.client.state_code ? ` (${ctx.client.state_code})` : ''}` : ''].filter(Boolean),
-    headerFields: layout.headerFields.map((h) => ({ label: h.label, value: fill(h.value, p) })),
+    headerFields,
     columns: layout.columns,
     rows,
     summary,
@@ -525,5 +603,66 @@ export function defaultDutyLayout(): Layout {
     notes: ['Duty slips signed by the user officer are enclosed.'],
     declaration: 'Certified that the particulars given above are true and correct and the amount indicated is the actual amount charged.',
     signatures: ['For {supplierName}', 'Authorised Signatory'],
+  });
+}
+
+/**
+ * The LR Taxi Services "merged invoice" format used on the other billing app: a bordered letterhead,
+ * a duty block per trip (Duty for / Upto / Total running / extra charges) and the totals as rows of the
+ * same table, ending in the brand total. Pair it with the contract's "LR exact" printed arithmetic.
+ */
+export function lrStandardLayout(): Layout {
+  return LayoutSchema.parse({
+    title: '',
+    page: { size: 'A4', orientation: 'landscape', margins: [28, 28, 28, 36], fontSize: 9 },
+    letterhead: 'box',
+    totalsInTable: true,
+    brandLabel: 'L.R TAXI SERVICES',
+    showSupplier: false,
+    showClient: false,
+    headerFields: [
+      { label: 'SAC :-', value: '{sac}' },
+      { label: 'PAN NO :-', value: '{supplierPan}' },
+      { label: 'GSTIN :', value: '{supplierGstin}' },
+      { label: 'BILL NO :', value: '{billNo}' },
+      { label: 'DATE :', value: '{billDate}' },
+    ],
+    rowMode: 'block',
+    block: {
+      header: 'Duty for ( {vehicleModel} )',
+      packageLabel: 'Upto : {includedKm} kms/{includedHours} hrs duty',
+      runningLabel: 'Total running : ({totalKm} kms/{totalHours} hrs)',
+      componentLabels: { EXHR: 'Extra Hrs:', EXKM: 'Extra Kms:', NIGHT: 'Night Charges', DRIVER: 'Driver Allowance' },
+      chargeOrder: ['EXHR', 'EXKM', 'NIGHT', 'DRIVER'],
+      mergeReimbursements: true,
+      reimbursementLabel: 'Toll Tax & Parking',
+      vehicleShortDigits: 0,
+      blankRowBetween: false,
+      showPackageUnit: true,
+      lrWording: true,
+    },
+    dateFormat: 'dd.mm.yy',
+    numberStyle: 'indian',
+    taxLabel: '{taxType} {rate}%',
+    columns: [
+      { key: 'sno', label: 'S. NO', width: 38, format: 'text', align: 'center' },
+      { key: 'dutyDate', label: 'DATE', width: 62, format: 'date', align: 'center' },
+      { key: 'vehicleRegNo', label: 'Car No', width: 60, format: 'text', align: 'center' },
+      { key: 'description', label: 'DESCRIPTION', width: 240, format: 'text', align: 'left' },
+      { key: 'unit', label: 'UNIT', width: 55, format: 'number', align: 'center' },
+      { key: 'rate', label: 'RATE', width: 70, format: 'money', align: 'right' },
+      { key: 'nonTaxable', label: 'Non Taxable', width: 85, format: 'money', align: 'right' },
+      { key: 'amount', label: 'Amount', width: 95, format: 'money', align: 'right' },
+    ],
+    summary: [
+      { label: 'Taxable Amount', value: 'taxableValue' },
+      { label: '{tax}', value: 'taxLines' },
+      { label: 'Toll Tax & Parking', value: 'nonTaxableTotal', column: 'nonTaxable' },
+      { label: 'Total Amount', value: 'grandTotal' },
+    ],
+    amountInWords: false,
+    notes: [],
+    declaration: '',
+    signatures: [],
   });
 }
