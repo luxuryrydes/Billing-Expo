@@ -373,6 +373,8 @@ export async function saveRate(db: Db, a: {
     schemeId = (await db.one<{ id: string }>('SELECT id FROM rate_schemes WHERE contract_id = $1 AND lower(name) = lower($2)', [a.contractId, name]))?.id
       ?? (await db.one<{ id: string }>('INSERT INTO rate_schemes(contract_id, name, description) VALUES ($1,$2,$3) RETURNING id', [a.contractId, name, 'Department rate card']))!.id;
   }
+  // A new version replaces the unapproved ones before it, so approvers see one current proposal per rate.
+  await db.query(`UPDATE rate_scheme_versions SET status = 'retired', notes = COALESCE(notes, '') || ' [Superseded by a newer version before approval]' WHERE scheme_id = $1 AND status IN ('pending_approval','draft')`, [schemeId]);
   const contract = await db.one<{ end_date: string | null }>('SELECT end_date FROM contracts WHERE id = $1', [a.contractId]);
   const v = await db.one<{ id: string; version_no: number }>(
     `INSERT INTO rate_scheme_versions(scheme_id, version_no, status, effective_from, effective_to, vehicle_category_ids, duty_type_codes, config, clause_ref, notes, created_by, submitted_by, meta)
@@ -400,9 +402,17 @@ export async function syncTax(db: Db, contractId: string, tax: ResolvedTax, effe
   if (tax.mode === 'UNRESOLVED') return null;
   const want = tax.mode === 'CGST_SGST' ? [['CGST', tax.cgst], ['SGST', tax.sgst]] : tax.mode === 'IGST' ? [['IGST', tax.igst]] : [['IGST', '0']];
   const current = await db.query<{ id: string; tax_type: string; rate: string; effective_from: string; effective_to: string | null; status: string }>(
-    `SELECT * FROM tax_rules WHERE contract_id = $1 AND status = 'approved' AND effective_from <= $2 AND (effective_to IS NULL OR effective_to >= $2)`, [contractId, effectiveFrom]);
+    // Draft rules (from an earlier import that was not approved) count as current, so importing the same sheet again adds no duplicates.
+    `SELECT * FROM tax_rules WHERE contract_id = $1 AND status IN ('approved','draft') AND effective_from <= $2 AND (effective_to IS NULL OR effective_to >= $2)`, [contractId, effectiveFrom]);
   const same = current.length === want.length && want.every(([ty, r]) => current.some((c) => c.tax_type === ty && Number(c.rate) === Number(r)));
-  if (same) return null;
+  if (same) {
+    // Importing with approval approves rules that were waiting.
+    if (approve && current.some((c) => c.status === 'draft')) {
+      await db.query(`UPDATE tax_rules SET status = 'approved', approved_by = $2, approved_at = now() WHERE id = ANY($1::uuid[]) AND status = 'draft'`, [current.filter((c) => c.status === 'draft').map((c) => c.id), userId]);
+      return 'Tax rules approved';
+    }
+    return null;
+  }
   for (const c of current) {
     if (c.effective_from >= effectiveFrom) await db.query(`UPDATE tax_rules SET status = 'retired' WHERE id = $1`, [c.id]);
     else await db.query('UPDATE tax_rules SET effective_to = $2 WHERE id = $1', [c.id, addDays(effectiveFrom, -1)]);

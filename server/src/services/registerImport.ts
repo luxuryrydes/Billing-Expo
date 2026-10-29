@@ -249,10 +249,11 @@ export async function analyseRegister(db: Db, wb: Workbook, o: RegisterOptions) 
       if (distinct.length > 1) plan.warnings.push(`Rates show different taxes (${distinct.map(taxDisplay).join(' / ')}); the bill uses one tax for the department: ${taxDisplay(distinct[0])}. Check the contract's tax rules.`);
       if (!plan.tax && list.length) plan.warnings.push(`Tax could not be worked out (${resolveTax(list[0].entry, clientState, supState).reason}). Set it on the contract's Tax rules tab.`);
       if (plan.tax && contract.id) {
-        const cur = await db.query<{ tax_type: string; rate: string }>(`SELECT tax_type, rate FROM tax_rules WHERE contract_id = $1 AND status = 'approved' AND effective_from <= $2 AND (effective_to IS NULL OR effective_to >= $2)`, [contract.id, o.changesFrom]);
+        const cur = await db.query<{ tax_type: string; rate: string; status: string }>(`SELECT tax_type, rate, status FROM tax_rules WHERE contract_id = $1 AND status IN ('approved','draft') AND effective_from <= $2 AND (effective_to IS NULL OR effective_to >= $2)`, [contract.id, o.changesFrom]);
         const want = plan.tax.mode === 'CGST_SGST' ? [['CGST', plan.tax.cgst], ['SGST', plan.tax.sgst]] : plan.tax.mode === 'IGST' ? [['IGST', plan.tax.igst]] : [['IGST', '0']];
         const same = cur.length === want.length && want.every(([ty, r]) => cur.some((c) => c.tax_type === ty && Number(c.rate) === Number(r)));
-        plan.taxChange = same ? null : `${cur.length ? cur.map((c) => `${c.tax_type} ${Number(c.rate)}%`).join(' + ') : 'none'} → ${taxDisplay(plan.tax)}`;
+        const waiting = same && o.approve && cur.some((c) => c.status === 'draft');
+        plan.taxChange = waiting ? `approve the waiting tax rules (${taxDisplay(plan.tax)})` : same ? null : `${cur.length ? cur.map((c) => `${c.tax_type} ${Number(c.rate)}%`).join(' + ') : 'none'} → ${taxDisplay(plan.tax)}`;
       } else if (plan.tax) plan.taxChange = `none → ${taxDisplay(plan.tax)}`;
       plans.set(key, plan);
     }
