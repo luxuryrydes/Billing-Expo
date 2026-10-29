@@ -24,13 +24,30 @@ try {
   await seedReferenceData(db);
   app = await buildApp(db, { logger: true });
 } catch (e) {
-  // Answer every request with the reason (connection strings hidden) so the problem is visible in the app.
-  const reason = ((e as Error).message ?? String(e)).replace(/postgres(ql)?:\/\/\S+/gi, '[DATABASE_URL]');
+  const message = (e as Error).message ?? String(e);
   console.error('Billing server could not start:', e);
+  if (!process.env.VERCEL) {
+    // On your own computer there is nothing to answer requests with: say what is wrong and stop.
+    const dbBusy = /Aborted\(\)|could not open file/i.test(message) && !/^postgres/i.test(process.env.DATABASE_URL ?? '');
+    console.error(dbBusy
+      ? '\nThe embedded database could not be opened. Most likely another copy of the server (npm run dev, npm start or start-windows.bat) is still running and is using the same data folder. Close it, then start this again. If no other copy is running, the data/pglite folder may be damaged: stop everything, copy it somewhere safe, and ask for help restoring it.'
+      : `\nThe billing server could not start: ${message}`);
+    process.exit(1);
+  }
+  // On a host (Vercel): answer every request with the reason (connection strings hidden) so it is visible in the app.
+  const reason = message.replace(/postgres(ql)?:\/\/\S+/gi, '[DATABASE_URL]');
   app = Fastify({ logger: true });
   app.all('/*', async (_req, reply) => reply.status(503).send({ error: `The billing server could not start: ${reason}`, startup: true }));
 }
-await app.listen({ port, host });
+try {
+  await app.listen({ port, host });
+} catch (e) {
+  if ((e as { code?: string }).code === 'EADDRINUSE') {
+    console.error(`\nPort ${port} is already in use — the app is probably already running at http://localhost:${port}. Close the other copy (npm start, start-windows.bat or another npm run dev) or set a different PORT in .env, then start again.`);
+    process.exit(1);
+  }
+  throw e;
+}
 
 const shutdown = async () => {
   await app.close();
