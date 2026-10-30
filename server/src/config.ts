@@ -39,6 +39,10 @@ export const config = {
   workerScript: path.join(root, 'worker', 'extract.py'),
   /** Document worker as a web service (Vercel injects this through the service binding). Empty = run Python locally. */
   workerUrl: env.WORKER_URL ?? '',
+  /** Scanner access: wia (Windows, this computer's scanner) or mock (tests). Not available on a hosted server. */
+  scannerDriver: env.SCANNER_DRIVER ?? 'wia',
+  /** Duty slip reading: claude (AI vision) or mock (tests). */
+  slipReader: env.SLIP_READER ?? 'claude',
   anthropicApiKey: env.ANTHROPIC_API_KEY ?? '',
   anthropicModel: env.ANTHROPIC_MODEL ?? 'claude-opus-5-5',
   webDist: path.join(root, 'web', 'dist'),

@@ -185,6 +185,17 @@ export async function findSameDuty(db: Db, d: DutyInputT, taken: Set<string>) {
   return free.length === 1 && rows.length === 1 ? free[0]! : null;
 }
 
+/** Compares a duty with what is saved, field by field; an emptied value counts as a change (used when a person edits a saved slip). */
+export function diffDuty(existing: Record<string, unknown>, d: DutyInputT): { field: string; from: string | null; to: string | null }[] {
+  const changes: { field: string; from: string | null; to: string | null }[] = [];
+  for (const f of MATCH_FIELDS) {
+    const was = cmp(f, existing[COL_OF[f]]);
+    const now = cmp(f, d[f]);
+    if (now !== was) changes.push({ field: f, from: was, to: now });
+  }
+  return changes;
+}
+
 /**
  * Compares an imported row with the saved duty. Blank cells keep the saved value; returns the
  * merged duty and the fields that really changed.

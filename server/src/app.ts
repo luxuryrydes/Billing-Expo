@@ -19,6 +19,7 @@ import { reportRoutes } from './routes/reports.js';
 import { onboardingRoutes } from './routes/onboarding.js';
 import { importRoutes } from './routes/imports.js';
 import { rateCardRoutes } from './routes/rateCard.js';
+import { scanRoutes } from './routes/scan.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -34,7 +35,7 @@ export async function buildApp(db: Db, opts: { logger?: boolean } = {}): Promise
   app.decorate('db', db);
   app.setErrorHandler(errorHandler);
   await app.register(cookie);
-  await app.register(multipart, { limits: { fileSize: config.maxUploadMb * 1024 * 1024, files: 1 } });
+  await app.register(multipart, { limits: { fileSize: config.maxUploadMb * 1024 * 1024, files: 200 } });
 
   app.addHook('onRequest', async (req) => {
     if (!req.url.startsWith('/api/')) return;
@@ -63,6 +64,7 @@ export async function buildApp(db: Db, opts: { logger?: boolean } = {}): Promise
       await onboardingRoutes(api);
       await importRoutes(api);
       await rateCardRoutes(api);
+      await scanRoutes(api);
     },
     { prefix: '/api' },
   );

@@ -124,6 +124,14 @@ Optional demo dataset (a DEMO department, DEMO rates/taxes, 78 September duties,
 DATABASE_URL=data/demo-db STORAGE_DIR=data/demo-files npm run seed:demo
 ```
 
+### Duty Slip Scanning & Billing
+
+**Daily work → Duty Slip Scanning & Billing** takes a stack of paper duty slips to a bill:
+1. **Scan.** Pick the scanner, colour / grey / black & white, DPI, and the document feeder (all pages) or flatbed (one page), then **Start scanning**. Scanner access uses Windows (WIA) through `server/scripts/wia-scan.ps1`, so it works only in a copy of the software running on the computer the scanner is connected to; a hosted copy (Vercel) cannot reach it. Images scanned elsewhere can be uploaded instead. Double-sided scanning is offered only if the scanner supports it (the HP M127/M128 does not: scan one side, turn the stack over, then use **Add pages**).
+2. **Pages.** Rotate, crop (drag a rectangle), delete and restore, reorder (drag, or Earlier / Later), rescan one page on the flatbed, or restore the original. The scanned original is always kept.
+3. **Read & review.** **Read pages with AI** sends each page image to Claude, which fills 25 fields (slip no., date, vehicle, department, officer, locations, times, opening/closing/total/extra km, hours, night / parking / toll / other charges, driver and mobile, remarks, signature) with a confidence for each. Amber cells are uncertain; type over any value (green = corrected by you). **Download Excel** / **Upload edited Excel** lets you correct many slips in a spreadsheet; only the cells you change are applied. Needs `ANTHROPIC_API_KEY` in `.env`; the scans are sent to Anthropic for reading.
+4. **Save as duties & bill.** **Check** shows what would happen without saving; **Save as duties** creates the duties (department matched to its active contract, vehicle type to a category, times and numbers converted, impossible dates and missing vehicle numbers refused, not guessed). Saving again updates the same duties and never adds copies; duties on an approved bill are left alone. **Create & calculate bill** prepares the month's bill; review, approval and export then follow the normal Billing Workspace steps. Nothing is approved automatically.
+
 ### LR Standard invoice (merged-invoice format)
 
 The format of the other LR Taxi Services billing app, available per department:

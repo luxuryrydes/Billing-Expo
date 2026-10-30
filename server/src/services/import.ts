@@ -112,6 +112,14 @@ const MONTHS: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5,
 
 /** Parses Indian-style dates (DD-MM-YYYY, DD/MM/YY, 05-Sep-2025, ISO). */
 export function parseDate(c: CellVal | undefined): string | null {
+  const d = parseDateLoose(c);
+  if (!d) return null;
+  const [y, m, day] = d.split('-').map(Number);
+  const real = new Date(Date.UTC(y, m - 1, day));
+  return real.getUTCFullYear() === y && real.getUTCMonth() === m - 1 && real.getUTCDate() === day ? d : null; // 31/02 is not a date
+}
+
+function parseDateLoose(c: CellVal | undefined): string | null {
   if (!c) return null;
   if (c.date) return c.date;
   const s = c.text.trim();

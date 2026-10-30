@@ -20,6 +20,7 @@ import { BillsPage } from './pages/BillingExport';
 import { ReportsPage } from './pages/Reports';
 import { UsersPage, AuditPage, SettingsPage } from './pages/Admin';
 import { OnboardingPage } from './pages/Onboarding';
+import { ScanSlipsPage } from './pages/ScanSlips';
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } } });
 
@@ -31,6 +32,7 @@ const NAV: { to: string; label: string; perm?: string; group?: string }[] = [
   { to: '/rates', label: 'Rate Schemes' },
   { to: '/duties/entry', label: 'Daily Duty Entry', group: 'Daily work' },
   { to: '/duties', label: 'Duty Register' },
+  { to: '/scan', label: 'Duty Slip Scanning & Billing', perm: 'duty.write' },
   { to: '/billing', label: 'Billing Workspace', group: 'Billing' },
   { to: '/bills', label: 'Billing Export / Invoices' },
   { to: '/templates', label: 'Billing Templates' },
@@ -83,6 +85,7 @@ function Shell() {
           <Route path="/templates/versions/:id" element={<TemplateVersionPage />} />
           <Route path="/duties/entry" element={<DutyEntryPage />} />
           <Route path="/duties" element={<DutyRegisterPage />} />
+          <Route path="/scan" element={<ScanSlipsPage />} />
           <Route path="/billing" element={<BillingWorkspacePage />} />
           <Route path="/billing/:id" element={<BillingWorkspacePage />} />
           <Route path="/bills" element={<BillsPage />} />
