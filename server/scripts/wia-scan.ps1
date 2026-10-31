@@ -23,7 +23,11 @@ function TrySet($props, $name, $id, $value) {
   if ($null -eq $p) { return $false }
   try { $p.Value = $value; return $true } catch { return $false }
 }
-function Hr($e) { return ('{0:X8}' -f ([uint32]($e.Exception.HResult -band 0xFFFFFFFF))) }
+function Hr($e) {
+  $h = $e.Exception.HResult
+  if ($null -eq $h -or $h -eq 0) { $h = ($e.Exception.InnerException).HResult }   # a COM error can be wrapped
+  return ('{0:X8}' -f [int]$h)                                                   # a negative HRESULT prints as FFFFFFFF-style hex
+}
 
 $FMT_JPEG = '{B96B3CAE-0728-11D3-9D7B-0000F81EF32E}'
 $FMT_PNG = '{B96B3CAF-0728-11D3-9D7B-0000F81EF32E}'
@@ -65,10 +69,16 @@ $null = TrySet $item.Properties 'Vertical Extent' 6152 ([int][math]::Round(11.69
 $fmt = if ($Mode -eq 'bw') { $FMT_PNG } else { $FMT_JPEG }
 $ext = if ($Mode -eq 'bw') { 'png' } else { 'jpg' }
 
+$FMT_BMP = '{B96B3CAB-0728-11D3-9D7B-0000F81EF32E}'
+$useFmt = $fmt
 $n = 0
 while ($n -lt $MaxPages) {
   try {
-    $img = $item.Transfer($fmt)
+    try { $img = $item.Transfer($useFmt) }
+    catch {
+      # The HP LaserJet M127/M128 driver refuses JPEG/PNG transfers (invalid argument) but scans fine as BMP: use BMP, then convert below.
+      if ((Hr $_) -in '80070057', '80004002') { $useFmt = $FMT_BMP; $img = $item.Transfer($useFmt) } else { throw }
+    }
     if ($img.FileExtension -ne $ext) {   # some drivers ignore the requested format and return BMP: convert it
       $ip = New-Object -ComObject WIA.ImageProcess
       $ip.Filters.Add($ip.FilterInfos.Item('Convert').FilterID)
@@ -82,11 +92,17 @@ while ($n -lt $MaxPages) {
       break
     }
     $msg = switch ($code) {
-      '80210001' { 'The scanner is busy.' }
+      '80210001' { 'The scanner reported a general error.' }
       '80210002' { 'Paper jam in the scanner.' }
+      '80210004' { 'Paper problem: check the pages in the feeder.' }
       '80210005' { 'The scanner is offline. Check it is switched on and connected.' }
-      '80210006' { 'The scanner cover is open.' }
-      '8021000A' { 'The scanner lamp or sensor reported an error.' }
+      '80210006' { 'The scanner is busy, or the cover is open. Close other scanning programs (HP Scan) and try again.' }
+      '80210007' { 'The scanner is warming up. Wait a moment and try again.' }
+      '80210008' { 'The scanner needs attention (cover open or user action on the scanner).' }
+      '8021000A' { 'The computer could not communicate with the scanner.' }
+      '8021000D' { 'The scanner is locked by another program. Close other scanning programs and try again.' }
+      '80070057' { 'The scanner did not accept the scan settings (invalid argument).' }
+      '80004002' { 'This scanner driver does not support the request.' }
       default { "Scanner error $code. $($_.Exception.Message)" }
     }
     Emit @{ error = "wia_$code"; message = $msg; pages = $n }

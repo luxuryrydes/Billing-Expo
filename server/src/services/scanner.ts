@@ -39,11 +39,13 @@ function runScript(args: string[], onLine: (o: Record<string, any>) => Promise<v
     let buf = '';
     let err = '';
     let failure: ScannerError | null = null;
+    let finished = false;
     let chain: Promise<void> = Promise.resolve();
     const timer = setTimeout(() => { p.kill(); reject(new ScannerError('timeout', 'The scanner did not finish in time.')); }, timeoutMs);
     const handle = (line: string) => {
       let o: Record<string, any>;
       try { o = JSON.parse(line); } catch { return; }
+      if (o.done || o.ok) finished = true;
       if (o.error) { failure = new ScannerError(String(o.error), String(o.message ?? o.error)); return; }
       chain = chain.then(() => onLine(o)).catch((e) => { failure ??= e instanceof ScannerError ? e : new ScannerError('failed', (e as Error).message); });
     };
@@ -58,10 +60,11 @@ function runScript(args: string[], onLine: (o: Record<string, any>) => Promise<v
       clearTimeout(timer);
       if (buf.trim()) handle(buf.trim());
       await chain;
+      // The helper stopped without saying it finished or why: show what Windows told it instead of a bare "no pages".
+      if (!failure && !finished && err.trim()) failure = new ScannerError('helper_failed', `The scanner helper stopped: ${err.trim().replace(/\s+/g, ' ').slice(0, 300)}`);
       if (failure) reject(failure);
       else resolve();
     });
-    void err;
   });
 }
 
