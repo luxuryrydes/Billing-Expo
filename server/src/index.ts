@@ -19,6 +19,11 @@ try {
     throw new Error('DATABASE_URL is not set to a PostgreSQL connection string (Neon, Supabase…). Add it in the Vercel project settings → Environment Variables, then redeploy.');
   }
   const [{ buildApp }, { createDb }, { migrate }, { seedReferenceData }] = await Promise.all([import('./app.js'), import('./db/index.js'), import('./db/migrate.js'), import('./db/seed.js')]);
+  if (!config.onVercel && !/^postgres(ql)?:\/\//.test(config.databaseUrl) && config.databaseUrl !== 'memory://') {
+    const { snapshotDatabase } = await import('./lib/snapshot.js');
+    const made = snapshotDatabase(config.databaseUrl);
+    if (made) console.log(`Backup copy of the database saved: ${made}`);
+  }
   db = await createDb();
   await migrate(db, (m) => console.log(m));
   await seedReferenceData(db);
@@ -30,7 +35,7 @@ try {
     // On your own computer there is nothing to answer requests with: say what is wrong and stop.
     const dbBusy = /Aborted\(\)|could not open file/i.test(message) && !/^postgres/i.test(process.env.DATABASE_URL ?? '');
     console.error(dbBusy
-      ? '\nThe embedded database could not be opened. Most likely another copy of the server (npm run dev, npm start or start-windows.bat) is still running and is using the same data folder. Close it, then start this again. If no other copy is running, the data/pglite folder may be damaged: stop everything, copy it somewhere safe, and ask for help restoring it.'
+      ? '\nThe embedded database could not be opened. Most likely another copy of the server (npm run dev, npm start or start-windows.bat) is still running and is using the same data folder. Close it, then start this again. If no other copy is running, the data/pglite folder may be damaged: stop everything, rename it to data/pglite-damaged, and copy the newest folder from data/backups (auto-…) to data/pglite.'
       : `\nThe billing server could not start: ${message}`);
     process.exit(1);
   }
@@ -56,3 +61,6 @@ const shutdown = async () => {
 };
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+// Closing the console window (SIGHUP) or Ctrl+Break (SIGBREAK) on Windows must also close the database cleanly.
+process.on('SIGHUP', shutdown);
+process.on('SIGBREAK', shutdown);

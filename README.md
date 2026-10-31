@@ -148,6 +148,10 @@ The format of the other LR Taxi Services billing app, available per department:
 
 Stop the app, then run (PowerShell): `$env:ADMIN_EMAIL='you@example.com'; $env:ADMIN_PASSWORD='a long password'; npm run set-admin --workspace server`. It creates the administrator, or resets the password of an existing user and makes them an active administrator. Start the app again, sign in, and add more users under **Users**. The password is read from the environment and is not stored in any file.
 
+### Protecting the data
+
+Every start of the app copies the embedded database folder to `data/backups/auto-YYYYMMDD-HHMM` (at most every 12 hours, newest 7 kept), and closing the console window now shuts the database down cleanly. If `data/pglite` ever stops opening, stop all copies of the app, rename it to `data/pglite-damaged`, copy the newest `data/backups/auto-…` folder to `data/pglite`, and start again. Always stop the app with Ctrl+C or by closing its window; never end the process from Task Manager.
+
 ### Running live through a Cloudflare Tunnel
 
 1. Start the app with `start-windows.bat` (it listens on `127.0.0.1:4000`; leave `HOST` as it is so only the tunnel reaches it).
