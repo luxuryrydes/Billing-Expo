@@ -124,6 +124,10 @@ Optional demo dataset (a DEMO department, DEMO rates/taxes, 78 September duties,
 DATABASE_URL=data/demo-db STORAGE_DIR=data/demo-files npm run seed:demo
 ```
 
+### Home dashboard
+
+The **Dashboard** is written for non-specialists: a greeting with quick actions; a "Getting started" checklist until the first bill exists; **Needs your attention** cards (duties with mistakes, billing problems, scanned slips not saved, duties to check, bills / rates / tax rules waiting for approval; approval cards only for people allowed to approve); this month's approved billing against last month; a 12-month chart and top departments (each with a table view and keyboard/hover details); a bill pipeline by stage; recent bills; and recent activity in plain words. Only approved, generated and submitted bills count as billed. The figures come from `GET /api/dashboard` and are covered by `server/src/dashboard.test.ts`.
+
 ### Duty Slip Scanning & Billing
 
 **Daily work → Duty Slip Scanning & Billing** takes a stack of paper duty slips to a bill:
