@@ -35,6 +35,28 @@ async function cropped(url: string, r: { x: number; y: number; w: number; h: num
   return toBlob(c);
 }
 
+/** Any picture the browser can open (JPG, PNG, BMP, WebP, GIF, phone photos) becomes a JPG or PNG the server accepts. */
+const OK_IMAGE = /\.(jpe?g|png)$/i;
+async function prepareImages(files: FileList | File[]): Promise<{ ready: File[]; refused: string[] }> {
+  const ready: File[] = [];
+  const refused: string[] = [];
+  for (const f of Array.from(files)) {
+    if (OK_IMAGE.test(f.name)) { ready.push(f); continue; }
+    if (!f.type.startsWith('image/')) { refused.push(f.name); continue; }
+    const url = URL.createObjectURL(f);
+    try {
+      const i = await loadImage(url);
+      const c = document.createElement('canvas');
+      c.width = i.naturalWidth; c.height = i.naturalHeight;
+      c.getContext('2d')!.drawImage(i, 0, 0);
+      ready.push(new File([await toBlob(c)], f.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' }));
+    } catch { refused.push(f.name); }
+    finally { URL.revokeObjectURL(url); }
+  }
+  return { ready, refused };
+}
+const IMAGE_ACCEPT = '.jpg,.jpeg,.png,.bmp,.webp,.gif,image/*';
+
 export function ScanSlipsPage() {
   const { can } = useAuth();
   const [sp, setSp] = useSearchParams();
@@ -94,13 +116,24 @@ function ScanPanel({ status, onStarted }: { status: any; onStarted: (id: string)
   const { run, busy } = useAction();
   const dev = devices.data?.devices.find((d) => d.id === (f.deviceId || devices.data?.devices[0]?.id));
   useEffect(() => { if (!f.deviceId && devices.data?.devices[0]) setF((x) => ({ ...x, deviceId: devices.data!.devices[0].id })); }, [devices.data]);
-  const upload = async (files: FileList | null) => {
-    if (!files?.length) return;
+  const [over, setOver] = useState(false);
+  const [note, setNote] = useState('');
+  const upload = async (files: FileList | File[] | null) => {
+    if (!files || !files.length) return;
+    setNote('');
+    const { ready, refused } = await prepareImages(files);
+    if (refused.length) setNote(`Not added (not a picture this browser can open): ${refused.join(', ')}. Save them as JPG or PNG and try again.`);
+    if (!ready.length) return;
     const fd = new FormData();
-    Array.from(files).forEach((x) => fd.append('file', x));
-    const r = await run(() => api.post('/scan/batches/upload', fd), 'Images added');
+    ready.forEach((x) => fd.append('file', x));
+    const r = await run(() => api.post('/scan/batches/upload', fd), `${ready.length} image(s) added`);
     if (r) onStarted(r.batch.id);
   };
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((x) => x.type.startsWith('image/')); if (imgs.length) { e.preventDefault(); void upload(imgs); } };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  });
   const start = async () => {
     const r = await run(() => api.post('/scan/batches', { ...f, deviceId: f.deviceId || devices.data?.devices[0]?.id, title: f.title || undefined }));
     if (r) onStarted(r.batch.id);
@@ -125,9 +158,18 @@ function ScanPanel({ status, onStarted }: { status: any; onStarted: (id: string)
           </div>
         </>
       )}
-      <div className="row" style={{ marginTop: 10 }}>
-        <span className="small muted">Or add images scanned elsewhere (JPG / PNG):</span>
-        <input type="file" accept=".jpg,.jpeg,.png" multiple disabled={busy} onChange={(e) => { upload(e.target.files); e.target.value = ''; }} />
+      <div
+        className={`drop${over ? ' over' : ''}`} style={{ marginTop: 12 }}
+        onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
+        onDrop={(e) => { e.preventDefault(); setOver(false); void upload(e.dataTransfer.files); }}
+      >
+        <b>Add images instead of scanning</b>
+        <div className="small muted">Drop pictures of the duty slips here, paste them (Ctrl+V), or choose them. JPG, PNG, BMP, WebP and phone photos all work, and you can add many at once. Useful when the scanner is not on this computer.</div>
+        <div className="row" style={{ marginTop: 8, justifyContent: 'center' }}>
+          <label className="btn primary">Choose images<input type="file" accept={IMAGE_ACCEPT} multiple style={{ display: 'none' }} disabled={busy} onChange={(e) => { void upload(e.target.files); e.target.value = ''; }} /></label>
+          <label className="btn">Take a photo<input type="file" accept="image/*" capture="environment" style={{ display: 'none' }} disabled={busy} onChange={(e) => { void upload(e.target.files); e.target.value = ''; }} /></label>
+        </div>
+        {note && <div className="alert warn" style={{ marginTop: 8 }}>{note}</div>}
       </div>
     </div>
   );
@@ -140,8 +182,11 @@ function BatchHeader({ d, reload }: { d: any; reload: () => void }) {
   useEffect(() => setTitle(b.title), [b.id, b.title]);
   const addFiles = async (files: FileList | null) => {
     if (!files?.length) return;
+    const { ready, refused } = await prepareImages(files);
+    if (refused.length) alert(`Not added (not a picture this browser can open): ${refused.join(', ')}`);
+    if (!ready.length) return;
     const fd = new FormData();
-    Array.from(files).forEach((x) => fd.append('file', x));
+    ready.forEach((x) => fd.append('file', x));
     if (await run(() => api.post(`/scan/batches/${b.id}/pages`, fd), 'Pages added')) reload();
   };
   return (
@@ -151,7 +196,7 @@ function BatchHeader({ d, reload }: { d: any; reload: () => void }) {
         <Status s={b.status} />
         <span className="small muted">{b.source === 'upload' ? 'Uploaded images' : `${b.device_name ?? 'Scanner'} · ${b.color_mode} · ${b.dpi} DPI · ${b.scan_source === 'feeder' ? 'document feeder' : 'flatbed'}`}</span>
         <span className="spacer" />
-        <label className="btn sm">Add pages<input type="file" accept=".jpg,.jpeg,.png" multiple style={{ display: 'none' }} onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }} /></label>
+        <label className="btn sm">Add pages<input type="file" accept={IMAGE_ACCEPT} multiple style={{ display: 'none' }} onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }} /></label>
       </div>
       {b.status === 'scanning' && <div className="alert info" style={{ marginTop: 8 }}>Scanning… {d.pages.length} page(s) so far. Keep the pages in the scanner until it stops.</div>}
       {b.error && <div className="alert err" style={{ marginTop: 8 }}>{b.error}</div>}

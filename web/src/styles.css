@@ -267,3 +267,7 @@ a.dash-card:hover { border-color: var(--d-accent); text-decoration: none; box-sh
   .dash-kpis { grid-template-columns: 1fr; }
   .dash h1 { font-size: 22px; }
 }
+
+/* Image drop zone on the scanning page */
+.drop { border: 2px dashed var(--line-strong, #c9ced8); border-radius: 12px; padding: 16px; text-align: center; background: #fafbfc; }
+.drop.over { border-color: #2a78d6; background: #e8f1fc; }
