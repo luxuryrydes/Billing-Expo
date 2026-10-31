@@ -45,11 +45,15 @@ export function RateSchemesPage() {
   const [importFor, setImportFor] = useState<string | null>(null);
   const [pickContract, setPickContract] = useState(false);
   const [f, setF] = useState({ contract_id: '', name: '', description: '' });
+  const [bulk, setBulk] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{ approved: number; skipped: { id: string; reason: string }[] } | null>(null);
+  const pendingIds: string[] = (q.data ?? []).flatMap((s) => (s.versions ?? []).filter((v: any) => v.status === 'pending_approval').map((v: any) => v.id));
   return (
     <>
       <PageHead title="Rate Schemes" sub="Versioned, effective-dated billing rules per contract, vehicle category and duty type. Only approved versions are used for bills.">
         <select value={clientId} onChange={(e) => { setClientId(e.target.value); setContractId(''); }}><option value="">All departments</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
         <select value={contractId} onChange={(e) => setContractId(e.target.value)}><option value="">All contracts</option>{contracts.data?.map((k) => <option key={k.id} value={k.id}>{k.reference_no}</option>)}</select>
+        {can('rate.approve') && pendingIds.length > 0 && <button className="btn ok" onClick={() => { setBulkResult(null); setBulk(true); }}>Approve all pending ({pendingIds.length})</button>}
         {can('rate.write') && <button className="btn" onClick={() => (contractId ? setImportFor(contractId) : setPickContract(true))}>Import rate card</button>}
         {can('rate.write') && <button className="btn primary" onClick={() => { setF({ contract_id: contractId, name: '', description: '' }); setAdding(true); }}>New scheme</button>}
       </PageHead>
@@ -69,6 +73,18 @@ export function RateSchemesPage() {
           </table>
         )}
       </div>
+      {bulk && !bulkResult && (
+        <Confirm text={`Approve all ${pendingIds.length} rate versions waiting for approval${contractId || clientId ? ' in this view' : ''}? Approved rates are used on bills from their effective date. Each one is still checked for problems and overlaps; any that fail are listed and left pending.`}
+          yesLabel={`Approve ${pendingIds.length}`} onClose={() => setBulk(false)}
+          onYes={async () => { const r = await run(() => api.post('/rate-versions/approve-all', { ids: pendingIds })); if (r) { setBulkResult(r); q.refetch(); } else setBulk(false); }} />
+      )}
+      {bulk && bulkResult && (
+        <Modal title="Approval finished" onClose={() => { setBulk(false); setBulkResult(null); }}>
+          <p><b>{bulkResult.approved}</b> approved{bulkResult.skipped.length > 0 && <>, <b>{bulkResult.skipped.length}</b> left pending</>}.</p>
+          {bulkResult.skipped.length > 0 && <ul className="small">{bulkResult.skipped.slice(0, 20).map((s) => <li key={s.id}><Link to={`/rates/versions/${s.id}`}>Open</Link> — {s.reason}</li>)}</ul>}
+          <div className="row end"><button className="btn primary" onClick={() => { setBulk(false); setBulkResult(null); }}>Close</button></div>
+        </Modal>
+      )}
       {pickContract && (
         <Modal title="Import rate card — choose the contract" onClose={() => setPickContract(false)}>
           <ContractPicker value={f.contract_id} onChange={(v) => setF({ ...f, contract_id: v })} />

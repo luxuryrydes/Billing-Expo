@@ -219,6 +219,19 @@ export async function rateRoutes(app: FastifyInstance) {
     return db.tx((t) => approveVersion(t, id, req.user!.id, note));
   });
 
+  /** Approve many pending versions at once. Each one goes through the normal approval checks on its own; the ones that fail are listed, not hidden. */
+  app.post('/rate-versions/approve-all', { preHandler: perm('rate.approve') }, async (req) => {
+    const b = parse(z.object({ ids: z.array(z.string().uuid()).min(1).max(2000), note: optText }), req.body);
+    const approved: string[] = [];
+    const skipped: { id: string; reason: string }[] = [];
+    for (const id of b.ids) {
+      try { await db.tx((t) => approveVersion(t, id, req.user!.id, b.note ?? 'Approved in bulk')); approved.push(id); }
+      catch (e) { skipped.push({ id, reason: (e as Error).message }); }
+    }
+    await audit(db, req.user!.id, 'rate_version', approved[0] ?? b.ids[0], 'approve_all', undefined, { approved: approved.length, skipped: skipped.length });
+    return { approved: approved.length, skipped };
+  });
+
   app.post('/rate-versions/:id/reject', { preHandler: perm('rate.approve') }, async (req) => {
     const { id } = req.params as { id: string };
     const { note } = parse(z.object({ note: z.string().min(1, 'Give a reason') }), req.body);
