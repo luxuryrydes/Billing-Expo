@@ -144,6 +144,10 @@ The format of the other LR Taxi Services billing app, available per department:
 - **Printed arithmetic** (Contract → Tax & invoice settings): *LR exact* keeps each line as unit × rate to four decimals, charges tax on the unrounded taxable sum, shows two decimals and rounds the bill total to the whole rupee, as the other app prints it; it also honours the department's GST mode (`show_separate` prints the tax without adding it, `rcm` prints `GST Under RCM(Invoice)`). The New template dialog can switch the chosen contract for you. *Standard* (the default, unchanged) rounds every line and tax to paise. Hour and km rounding and grace still come from the rate scheme; choose *exact* there to match the other app minute for minute. LR exact applies to bills calculated after the switch.
 - Fill in the supplier profile (PAN, GSTIN) and the contract's SAC code, or the right-hand header lines print empty.
 
+### Creating or resetting an administrator
+
+Stop the app, then run (PowerShell): `$env:ADMIN_EMAIL='you@example.com'; $env:ADMIN_PASSWORD='a long password'; npm run set-admin --workspace server`. It creates the administrator, or resets the password of an existing user and makes them an active administrator. Start the app again, sign in, and add more users under **Users**. The password is read from the environment and is not stored in any file.
+
 ### Running live through a Cloudflare Tunnel
 
 1. Start the app with `start-windows.bat` (it listens on `127.0.0.1:4000`; leave `HOST` as it is so only the tunnel reaches it).
