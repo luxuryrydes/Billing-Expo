@@ -10,7 +10,7 @@ const env = process.env;
 
 /**
  * A folder path in DATABASE_URL is taken from the project root, like STORAGE_DIR, so every way of starting the
- * server (npm run dev, npm start, start-windows.bat) opens the same database. PostgreSQL URLs and memory:// are kept as they are.
+ * server (npm run dev, npm start, run-local.cmd) opens the same database. PostgreSQL URLs and memory:// are kept as they are.
  */
 function databaseUrl(value: string | undefined): string {
   if (!value) return path.join(root, 'data', 'pglite');

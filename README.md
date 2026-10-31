@@ -54,7 +54,7 @@ worker/   Python document worker (PyMuPDF, pdfplumber, openpyxl, python-docx)
 
 ## 3. Setup
 
-**Quick start:** install Node.js 20+ (and Python 3.10+ for reading PDF/Excel documents), then double-click `start-windows.bat` (on Linux/macOS run `sh start.sh`). The first run installs packages, builds the app and opens http://localhost:4000, where you create the administrator. Later runs start the app straight away. Your data is kept in the `data` folder.
+**Quick start:** install Node.js 20+ (and Python 3.10+ for reading PDF/Excel documents), then double-click `run-local.cmd` (on Linux/macOS run `sh start.sh`). It checks the project, installs and builds when needed, starts the backend, checks the Cloudflare Tunnel and the public address, and shows a status summary. The first run lets you create the administrator at http://localhost:4000. Your data is kept in the `data` folder.
 
 Manual setup:
 
@@ -154,12 +154,11 @@ Every start of the app copies the embedded database folder to `data/backups/auto
 
 ### Running live through a Cloudflare Tunnel
 
-1. Start the app with `start-windows.bat` (it listens on `127.0.0.1:4000`; leave `HOST` as it is so only the tunnel reaches it).
-2. In Cloudflare Zero Trust, create a tunnel and add a public hostname whose service is `http://localhost:4000`.
-3. Install the connector once, as Administrator: `cloudflared.exe service install <your token>`. It then starts with Windows. Alternatively put the token in `.env` as `CLOUDFLARE_TUNNEL_TOKEN` and run `start-tunnel.bat`.
-4. Set `COOKIE_SECURE=true` in `.env` and restart the app.
+**Daily use: double-click `run-local.cmd`.** It starts the backend (the website is served by the same process on port 4000), reuses the Cloudflare Tunnel service if it is running (starting it if it stopped), and confirms that `PUBLIC_URL` from `.env` (https://billing.lrbilling.in) really reaches this app. It never creates a tunnel, never asks for a token and never prints one. If the app is already running it says so and starts nothing twice; if the port belongs to another program it names it and stops without closing it; if the backend crashes it restarts it (up to 3 times). Keep its window open; stop with `stop-local.cmd`, Ctrl+C, or by closing the window (the database closes safely each way; never end the process from Task Manager). Logs are in `logs\`.
 
-The token is a secret: keep it out of git, and put Cloudflare Access (email login) in front of the hostname. Run only one copy of the app per data folder, and the PC must stay on.
+**One-time setup** (already done on the main PC): right-click `connect-tunnel.cmd` and choose Run as administrator. It installs the tunnel as the Windows service `cloudflared` (automatic start, restarts itself, reconnects after an internet drop). The token lives only in Windows' protected service file, not in this project. In Cloudflare the tunnel needs a route `billing.lrbilling.in` -> `http://localhost:4000`, and the `billing` DNS record (CNAME, Proxied) must point at that same tunnel (`<tunnel-id>.cfargotunnel.com`); error 1033 means it points at a tunnel with no connector. Put Cloudflare Access (email login) in front of the hostname, and keep `COOKIE_SECURE=true` in `.env`.
+
+Only the tunnel service starts with Windows; Billing Expo itself starts when you run `run-local.cmd`. Run only one copy of the app per data folder.
 
 ### Deploying on Vercel
 
