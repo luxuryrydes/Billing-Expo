@@ -37,9 +37,57 @@ export async function reportRoutes(app: FastifyInstance) {
        LEFT JOIN clients c ON c.id = d.client_id ORDER BY v.uploaded_at DESC LIMIT 8`);
     const recentBills = await db.query(
       `SELECT b.id, b.bill_no, b.status, b.grand_total, b.period_start, c.name AS client_name FROM bills b JOIN clients c ON c.id = b.client_id ORDER BY b.updated_at DESC LIMIT 8`);
+    // --- the home screen: what needs attention, how this month is going, and how billing is trending ---------------
+    const BILLED = `('approved','generated','submitted')`;
+    const [slipsToSave, ratesToApprove, taxToApprove, notBilled] = await Promise.all([
+      one(`SELECT count(*)::int AS n FROM slip_readings r JOIN scan_pages p ON p.id = r.page_id WHERE r.status = 'read' AND r.duty_id IS NULL AND NOT p.deleted`),
+      one(`SELECT count(*)::int AS n FROM rate_scheme_versions WHERE status = 'pending_approval'`),
+      one(`SELECT count(*)::int AS n FROM tax_rules WHERE status = 'draft'`),
+      one(`SELECT count(*)::int AS n FROM duties d WHERE d.status <> 'void' AND NOT EXISTS (
+             SELECT 1 FROM bill_duties bd JOIN bills b ON b.id = bd.bill_id WHERE bd.duty_id = d.id AND bd.active AND b.status NOT IN ('cancelled','superseded'))`),
+    ]);
+    const byMonth = await db.query<{ month: string; total: string; bills: number }>(
+      `SELECT to_char(m, 'YYYY-MM') AS month, coalesce(sum(b.grand_total), 0)::text AS total, count(b.id)::int AS bills
+       FROM generate_series(date_trunc('month', now()) - interval '11 months', date_trunc('month', now()), interval '1 month') AS m
+       LEFT JOIN bills b ON date_trunc('month', b.period_start)::date = m::date AND b.status IN ${BILLED}
+       GROUP BY m ORDER BY m`);
+    const cur = byMonth[byMonth.length - 1];
+    const prev = byMonth[byMonth.length - 2];
+    const pct = (a: string, b: string) => (Number(b) > 0 ? Math.round(((Number(a) - Number(b)) / Number(b)) * 1000) / 10 : null);
+    const duties = await db.one<{ cur: number; prev: number }>(
+      `SELECT (SELECT count(*) FROM duties WHERE duty_date >= date_trunc('month', current_date) AND status <> 'void')::int AS cur,
+              (SELECT count(*) FROM duties WHERE duty_date >= date_trunc('month', current_date) - interval '1 month' AND duty_date < date_trunc('month', current_date) AND status <> 'void')::int AS prev`);
+    const deptRows = await db.query<{ id: string; name: string; total: string; bills: number }>(
+      `SELECT c.id, c.name, sum(b.grand_total)::text AS total, count(*)::int AS bills FROM bills b JOIN clients c ON c.id = b.client_id
+       WHERE b.status IN ${BILLED} AND b.period_start >= date_trunc('month', now()) - interval '11 months' GROUP BY c.id, c.name ORDER BY sum(b.grand_total) DESC, c.name`);
+    const pipelineRows = await db.query<{ stage: string; n: number }>(
+      `SELECT CASE WHEN status IN ('draft','calculation_pending','validation_required') THEN 'preparing' WHEN status = 'under_review' THEN 'review' ELSE status END AS stage, count(*)::int AS n
+       FROM bills WHERE status NOT IN ('cancelled','superseded') AND updated_at >= now() - interval '90 days' GROUP BY 1`);
+    const activity = await db.query(
+      `SELECT a.id, a.at, a.action, a.entity_type, u.name AS user_name FROM audit_events a LEFT JOIN app_users u ON u.id = a.user_id
+       WHERE a.action NOT IN ('login', 'logout') ORDER BY a.at DESC LIMIT 10`);
+    const setup = await db.one<Record<string, number>>(
+      `SELECT (SELECT count(*)::int FROM supplier_profiles) AS supplier, (SELECT count(*)::int FROM clients) AS clients,
+              (SELECT count(*)::int FROM rate_scheme_versions WHERE status IN ('approved','pending_approval')) AS rates,
+              (SELECT count(*)::int FROM rate_scheme_versions WHERE status = 'approved') AS approved_rates,
+              (SELECT count(*)::int FROM duties WHERE status <> 'void') AS duties, (SELECT count(*)::int FROM bills) AS bills`);
+    const top = deptRows.slice(0, 6);
+    const rest = deptRows.slice(6);
     return {
       counts: { clients, activeContracts, dutiesToday, dutiesEnteredToday, withErrors, awaitingVerification, billsPreparing, billsAwaitingApproval, billsGeneratedThisMonth, openExceptions, pendingEntry: pendingEntry.length },
       pendingEntry, monthly, recentDocs, recentBills,
+      attention: { dutiesWithErrors: withErrors, slipsToSave, dutiesToVerify: awaitingVerification, billsToApprove: billsAwaitingApproval, ratesToApprove, taxToApprove, openExceptions },
+      month: {
+        key: cur.month, billed: cur.total, billedPrev: prev?.total ?? '0', billedChangePct: prev ? pct(cur.total, prev.total) : null,
+        bills: cur.bills, billsPrev: prev?.bills ?? 0, duties: duties?.cur ?? 0, dutiesPrev: duties?.prev ?? 0, dutiesChangePct: duties && duties.prev > 0 ? Math.round(((duties.cur - duties.prev) / duties.prev) * 1000) / 10 : null,
+        notBilled,
+      },
+      byMonth,
+      topDepartments: top.map((r) => ({ id: r.id, name: r.name, total: r.total, bills: r.bills })),
+      otherDepartments: rest.length ? { count: rest.length, total: rest.reduce((a, r) => a + Number(r.total), 0).toFixed(2) } : null,
+      pipeline: Object.fromEntries(['preparing', 'review', 'approved', 'generated', 'submitted'].map((k) => [k, pipelineRows.find((r) => r.stage === k)?.n ?? 0])),
+      activity,
+      setup,
     };
   });
 

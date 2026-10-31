@@ -72,3 +72,29 @@ export const STATUS_LABEL: Record<string, string> = {
   waived: 'Waived',
   resolved: 'Resolved',
 };
+
+/** Short rupee amounts for charts and tiles: ₹950, ₹12.5K, ₹4.2 L, ₹1.3 Cr (lakh and crore, as Indian users read them). */
+export function inrShort(v: string | number | null | undefined): string {
+  const n = Number(v ?? 0);
+  if (!Number.isFinite(n)) return '';
+  const a = Math.abs(n);
+  const sign = n < 0 ? '-' : '';
+  const f = (x: number) => String(Math.round(x * 100) / 100).replace(/(\.\d)0$/, '$1');
+  if (a >= 1e7) return `${sign}₹${f(a / 1e7)} Cr`;
+  if (a >= 1e5) return `${sign}₹${f(a / 1e5)} L`;
+  if (a >= 1e3) return `${sign}₹${f(a / 1e3)}K`;
+  return `${sign}₹${Math.round(a)}`;
+}
+
+/** "just now", "5 minutes ago", "3 hours ago", "yesterday", "12 Oct". */
+export function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '';
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} minute${Math.floor(s / 60) === 1 ? '' : 's'} ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} hour${Math.floor(s / 3600) === 1 ? '' : 's'} ago`;
+  if (s < 172800) return 'yesterday';
+  return new Date(t).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+}
