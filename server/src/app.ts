@@ -71,7 +71,11 @@ export async function buildApp(db: Db, opts: { logger?: boolean } = {}): Promise
 
   // Serve the built frontend in production.
   if (fs.existsSync(config.webDist)) {
-    await app.register(fastifyStatic, { root: config.webDist, wildcard: false });
+    // wildcard (the default) looks files up per request, so a rebuilt site works without restarting the server.
+    await app.register(fastifyStatic, {
+      root: config.webDist,
+      setHeaders: (res, filePath) => { if (filePath.endsWith('index.html')) res.header('Cache-Control', 'no-cache'); },
+    });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/')) return reply.status(404).send({ error: 'Not found' });
       return reply.sendFile('index.html');

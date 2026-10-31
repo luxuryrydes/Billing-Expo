@@ -144,6 +144,15 @@ The format of the other LR Taxi Services billing app, available per department:
 - **Printed arithmetic** (Contract → Tax & invoice settings): *LR exact* keeps each line as unit × rate to four decimals, charges tax on the unrounded taxable sum, shows two decimals and rounds the bill total to the whole rupee, as the other app prints it; it also honours the department's GST mode (`show_separate` prints the tax without adding it, `rcm` prints `GST Under RCM(Invoice)`). The New template dialog can switch the chosen contract for you. *Standard* (the default, unchanged) rounds every line and tax to paise. Hour and km rounding and grace still come from the rate scheme; choose *exact* there to match the other app minute for minute. LR exact applies to bills calculated after the switch.
 - Fill in the supplier profile (PAN, GSTIN) and the contract's SAC code, or the right-hand header lines print empty.
 
+### Running live through a Cloudflare Tunnel
+
+1. Start the app with `start-windows.bat` (it listens on `127.0.0.1:4000`; leave `HOST` as it is so only the tunnel reaches it).
+2. In Cloudflare Zero Trust, create a tunnel and add a public hostname whose service is `http://localhost:4000`.
+3. Install the connector once, as Administrator: `cloudflared.exe service install <your token>`. It then starts with Windows. Alternatively put the token in `.env` as `CLOUDFLARE_TUNNEL_TOKEN` and run `start-tunnel.bat`.
+4. Set `COOKIE_SECURE=true` in `.env` and restart the app.
+
+The token is a secret: keep it out of git, and put Cloudflare Access (email login) in front of the hostname. Run only one copy of the app per data folder, and the PC must stay on.
+
 ### Deploying on Vercel
 
 `vercel.json` deploys the repository as one Vercel project with three services:
