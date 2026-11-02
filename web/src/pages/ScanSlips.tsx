@@ -69,8 +69,13 @@ export function ScanSlipsPage() {
     refetchInterval: (q) => (q.state.data?.batch?.status === 'scanning' ? 1500 : false),
   });
   const [tab, setTab] = useState<Tab>('pages');
+  const [autoBatch, setAutoBatch] = useState('');   // a batch whose pages should be read by AI as soon as scanning ends
   const open = (id: string) => setSp(id ? { batch: id } : {});
   const reload = () => { qc.invalidateQueries({ queryKey: ['scan-batch', batchId] }); qc.invalidateQueries({ queryKey: ['scan-batches'] }); };
+
+  useEffect(() => {
+    if (autoBatch && autoBatch === batchId && detail.data?.batch?.status === 'ready') setTab('review');
+  }, [autoBatch, batchId, detail.data?.batch?.status]);
 
   if (!can('duty.write')) return <><PageHead title="Duty Slip Scanning & Billing" /><div className="alert warn">You need permission to enter duties to scan duty slips.</div></>;
   const st = status.data;
@@ -82,7 +87,7 @@ export function ScanSlipsPage() {
       </PageHead>
       <ErrorBox error={status.error ?? batches.error} />
       {st && !st.ai.configured && <div className="alert warn">AI reading is off. Add ANTHROPIC_API_KEY to the settings file (.env) and restart the software; scanned pages can still be saved and filled in by hand.</div>}
-      <ScanPanel status={st} onStarted={(id) => { open(id); setTab('pages'); qc.invalidateQueries({ queryKey: ['scan-batches'] }); }} />
+      <ScanPanel status={st} onStarted={(id, auto) => { open(id); setTab('pages'); setAutoBatch(auto ? id : ''); qc.invalidateQueries({ queryKey: ['scan-batches'] }); }} />
 
       <div className="panel">
         <div className="row" style={{ marginBottom: batchId ? 10 : 0 }}>
@@ -99,7 +104,7 @@ export function ScanSlipsPage() {
             <BatchHeader d={detail.data} reload={reload} />
             <Tabs<Tab> tabs={[['pages', `1. Pages (${detail.data.pages.filter((p: any) => !p.deleted).length})`], ['review', '2. Read & review'], ['save', '3. Save as duties & bill']]} value={tab} onChange={setTab} />
             {tab === 'pages' && <PagesTab d={detail.data} status={st} reload={reload} />}
-            {tab === 'review' && <ReviewTab d={detail.data} status={st} reload={reload} />}
+            {tab === 'review' && <ReviewTab d={detail.data} status={st} reload={reload} autoRead={autoBatch === batchId && autoBatch !== ''} onAutoStarted={() => setAutoBatch('')} />}
             {tab === 'save' && <SaveTab d={detail.data} reload={reload} />}
           </>
         )}
@@ -109,13 +114,14 @@ export function ScanSlipsPage() {
 }
 
 // --- starting a scan ----------------------------------------------------------------------------
-function ScanPanel({ status, onStarted }: { status: any; onStarted: (id: string) => void }) {
+function ScanPanel({ status, onStarted }: { status: any; onStarted: (id: string, autoRead?: boolean) => void }) {
   const available = status?.scanner?.available;
   const devices = useQuery({ queryKey: ['scan-devices'], enabled: !!available, queryFn: () => api.get<{ devices: any[] }>('/scan/devices'), retry: 0 });
   const [f, setF] = useState({ deviceId: '', mode: 'color', dpi: 200, source: 'feeder', duplex: false, title: '' });
   const { run, busy } = useAction();
   const dev = devices.data?.devices.find((d) => d.id === (f.deviceId || devices.data?.devices[0]?.id));
   useEffect(() => { if (!f.deviceId && devices.data?.devices[0]) setF((x) => ({ ...x, deviceId: devices.data!.devices[0].id })); }, [devices.data]);
+  const [autoRead, setAutoRead] = useState(true);
   const [over, setOver] = useState(false);
   const [note, setNote] = useState('');
   const upload = async (files: FileList | File[] | null) => {
@@ -127,7 +133,7 @@ function ScanPanel({ status, onStarted }: { status: any; onStarted: (id: string)
     const fd = new FormData();
     ready.forEach((x) => fd.append('file', x));
     const r = await run(() => api.post('/scan/batches/upload', fd), `${ready.length} image(s) added`);
-    if (r) onStarted(r.batch.id);
+    if (r) onStarted(r.batch.id, autoRead);
   };
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((x) => x.type.startsWith('image/')); if (imgs.length) { e.preventDefault(); void upload(imgs); } };
@@ -136,7 +142,7 @@ function ScanPanel({ status, onStarted }: { status: any; onStarted: (id: string)
   });
   const start = async () => {
     const r = await run(() => api.post('/scan/batches', { ...f, deviceId: f.deviceId || devices.data?.devices[0]?.id, title: f.title || undefined }));
-    if (r) onStarted(r.batch.id);
+    if (r) onStarted(r.batch.id, autoRead);
   };
   return (
     <div className="panel">
@@ -153,6 +159,7 @@ function ScanPanel({ status, onStarted }: { status: any; onStarted: (id: string)
           </div>
           <div className="row" style={{ marginTop: 8 }}>
             <label className="check"><input type="checkbox" checked={f.duplex} disabled={!dev?.duplex} onChange={(e) => setF({ ...f, duplex: e.target.checked })} />Scan both sides {dev && !dev.duplex && <span className="small muted">(this scanner does not support it; scan one side, turn the stack over, then scan again and add the pages)</span>}</label>
+            <label className="check" title="After the pages are scanned, the AI reads every slip and fills in the fields for you to check"><input type="checkbox" checked={autoRead} disabled={!status?.ai?.configured} onChange={(e) => setAutoRead(e.target.checked)} />Read slips with AI after scanning</label>
             <input placeholder="Batch name (optional)" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} style={{ width: 240 }} />
             <button className="btn primary" disabled={busy || status?.scanner?.busy || !devices.data?.devices.length} onClick={start}>{busy ? 'Starting…' : 'Start scanning'}</button>
           </div>
@@ -299,7 +306,7 @@ function PageViewer({ page, index, count, status, busy, run, reload, move }: { p
 }
 
 // --- step 2: read and review ---------------------------------------------------------------------
-function ReviewTab({ d, status, reload }: { d: any; status: any; reload: () => void }) {
+function ReviewTab({ d, status, reload, autoRead, onAutoStarted }: { d: any; status: any; reload: () => void; autoRead?: boolean; onAutoStarted?: () => void }) {
   const fields: FieldDef[] = status?.fields ?? [];
   const pages: any[] = d.pages.filter((p: any) => !p.deleted);
   const contracts = useContracts();
@@ -323,6 +330,10 @@ function ReviewTab({ d, status, reload }: { d: any; status: any; reload: () => v
     setProgress(null);
     reload();
   };
+  useEffect(() => {
+    if (autoRead && todo.length && status?.ai?.configured && !progress) { onAutoStarted?.(); void readAll(todo); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRead]);
   const saveCell = async (readingId: string, key: string, value: string) => { await run(() => api.put(`/scan/readings/${readingId}`, { edited: { [key]: value } })); reload(); };
   const importXlsx = async (file: File | undefined) => {
     if (!file) return;
