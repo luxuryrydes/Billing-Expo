@@ -40,7 +40,7 @@ export const config = {
   /** Document worker as a web service (Vercel injects this through the service binding). Empty = run Python locally. */
   workerUrl: env.WORKER_URL ?? '',
   /** Scanner access: wia (Windows, this computer's scanner) or mock (tests). Not available on a hosted server. */
-  scannerDriver: env.SCANNER_DRIVER ?? 'wia',
+  scannerDriver: env.SCANNER_DRIVER ?? 'auto',
   /** Duty slip reading: claude (AI vision) or mock (tests). */
   slipReader: env.SLIP_READER ?? 'claude',
   anthropicApiKey: env.ANTHROPIC_API_KEY ?? '',
