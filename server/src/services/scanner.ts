@@ -117,7 +117,8 @@ export async function listScanners(): Promise<ScanDevice[]> {
       const text = await runNaps2(['--listdevices', '--driver', driver], 30_000).catch(() => '');
       for (const line of text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)) out.push({ id: `${driver}::${line}`, name: `${line} (${driver.toUpperCase()})`, feeder: true, flatbed: true, duplex: false });
     }
-    return out;
+    // Windows often lists a second "#2" copy of the same scanner; put the plain ones first so they are the default.
+    return out.sort((a, b) => Number(/#\d+/.test(a.name)) - Number(/#\d+/.test(b.name)));
   }
   let devices: ScanDevice[] = [];
   await runScript(['-Action', 'list'], (o) => { if (o.ok) devices = (o.devices ?? []) as ScanDevice[]; }, 30_000);
