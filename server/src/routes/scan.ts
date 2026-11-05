@@ -14,7 +14,8 @@ import { badRequest, conflict, notFound, parse, uuid } from '../lib/http.js';
 import { checkUpload, loadFile, saveFile } from '../lib/storage.js';
 import { listScanners, scan, scannerBusy, scannerStatus, ScannerError, type ScanOptions } from '../services/scanner.js';
 import { readSlip, SLIP_FIELDS } from '../services/slipReader.js';
-import { effectiveValues, saveReadings, type ReadingRow } from '../services/slipDuty.js';
+import { buildDuty, effectiveValues, loadLookups, saveReadings, type ReadingRow } from '../services/slipDuty.js';
+import { previewCalculation, type CalcPreview } from '../services/slipCalc.js';
 import { exportSlipsXlsx, importSlipsXlsx } from '../services/slipExcel.js';
 
 const IMAGE_EXT = ['.jpg', '.jpeg', '.png'];
@@ -253,13 +254,37 @@ export async function scanRoutes(app: FastifyInstance) {
     return { dryRun: b.dryRun, results, summary: { add: count('add'), update: count('update'), unchanged: count('unchanged'), locked: count('locked'), error: count('error') } };
   });
 
+  /** The amount for every slip in the batch, from the approved rate in force on each duty date. Recalculated on every request, so it follows each edit. */
+  async function batchCalculations(id: string, dutyType: string) {
+    const batch = await db.one<{ id: string; title: string }>('SELECT id, title FROM scan_batches WHERE id = $1', [id]);
+    if (!batch) throw notFound('Scan batch');
+    const rows = await db.query<ReadingRow & { position: number }>(
+      `SELECT r.*, p.position FROM slip_readings r JOIN scan_pages p ON p.id = r.page_id WHERE r.batch_id = $1 AND NOT p.deleted ORDER BY p.position`, [id]);
+    const lookups = await loadLookups(db);
+    const out: Record<string, CalcPreview> = {};
+    for (const r of rows) {
+      if (r.status !== 'read') continue;
+      const built = buildDuty(effectiveValues(r), { contractId: r.contract_id, lookups, batchTitle: batch.title, position: r.position, defaultDutyType: dutyType || null });
+      out[r.id] = built.input
+        ? await previewCalculation(db, built.input)
+        : { status: 'review', message: built.problems.filter((p) => p.severity === 'error').map((p) => p.message).join(' ') || 'Some values are missing.', schemeVersionId: null, schemeName: null, versionNo: null, effectiveFrom: null, lines: [], taxLines: [], totals: null, variables: {} };
+    }
+    return out;
+  }
+  app.get('/scan/batches/:id/calculations', { preHandler: perm('view') }, async (req) => {
+    const { id } = req.params as { id: string };
+    const { dutyType } = parse(z.object({ dutyType: z.string().trim().max(40).default('LOCAL') }), req.query ?? {});
+    return batchCalculations(id, dutyType);
+  });
+
   // --- Excel -----------------------------------------------------------------------------------
   app.get('/scan/batches/:id/export.xlsx', { preHandler: perm('view') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const batch = await db.one<{ title: string }>('SELECT title FROM scan_batches WHERE id = $1', [id]);
     if (!batch) throw notFound('Scan batch');
     const rows = await db.query<ReadingRow & { position: number }>(`SELECT r.*, p.position FROM slip_readings r JOIN scan_pages p ON p.id = r.page_id WHERE r.batch_id = $1 AND NOT p.deleted ORDER BY p.position`, [id]);
-    const buf = await exportSlipsXlsx(batch.title, rows.map((r) => ({ reading: r, position: r.position })));
+    const calc = await batchCalculations(id, 'LOCAL');
+    const buf = await exportSlipsXlsx(batch.title, rows.map((r) => ({ reading: r, position: r.position, calc: calc[r.id] })));
     reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     reply.header('Content-Disposition', `attachment; filename="duty-slips-${batch.title.replace(/[^\w.-]+/g, '_')}.xlsx"`);
     return reply.send(buf);

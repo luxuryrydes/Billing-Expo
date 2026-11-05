@@ -37,11 +37,12 @@ const ENTITY_TEXT: Record<string, string> = {
   bill: 'a bill', duty: 'a duty', contract: 'a contract', client: 'a department', rate_version: 'a rate', rate_scheme: 'a rate', tax_rule: 'a tax rule', template: 'a bill format', template_version: 'a bill format',
   document: 'a document', document_version: 'a document', import: 'the rate register', scan_batch: 'a scan', scan_page: 'a scanned page', slip_reading: 'a scanned slip', user: 'a user', supplier: 'company details', vehicle: 'a vehicle',
 };
-function activityText(a: { action: string; entity_type: string; user_name: string | null }): string {
+function activityText(a: { action: string; entity_type: string; user_name: string | null; count?: number }): string {
+  const count = a.count ?? 1;
   const who = a.user_name ?? 'Someone';
   const act = ACTION_TEXT[a.action] ?? a.action.replace(/_/g, ' ');
   const what = a.action === 'setup_admin' ? '' : a.action === 'import_rate_register' ? 'departments and rates' : (ENTITY_TEXT[a.entity_type] ?? a.entity_type.replace(/_/g, ' '));
-  return `${who} ${act} ${what}`.replace(/\s+/g, ' ').trim();
+  return `${who} ${act} ${what}${count > 1 ? ` (${count} times)` : ''}`.replace(/\s+/g, ' ').trim();
 }
 
 function Delta({ pct, vs, goodWhenUp = true }: { pct: number | null; vs: string; goodWhenUp?: boolean }) {
@@ -72,6 +73,7 @@ export function DashboardPage() {
     { n: a.dutiesToVerify, sev: 'warning', icon: I.clock, title: 'Duties waiting to be checked', help: 'Check them against the duty slips before billing.', to: '/duties?status=entered', go: 'Check duties' },
     { n: a.billsToApprove, sev: 'warning', icon: I.clock, title: 'Bills waiting for approval', help: 'Prepared and sent for review.', to: '/bills?status=under_review', go: 'Review bills', perm: 'bill.approve' },
     { n: a.ratesToApprove, sev: 'warning', icon: I.doc, title: 'Rates waiting for approval', help: 'New or changed rates are not used on bills until approved.', to: '/rates', go: 'Approve rates', perm: 'rate.approve' },
+    { n: a.contractsEnding ?? 0, sev: 'info', icon: I.clock, title: 'Contracts ending soon or already ended', help: 'If the department sent an extension letter, upload it in the contract so the new end date is used.', to: '/contracts', go: 'Open contracts' },
     { n: a.taxToApprove, sev: 'warning', icon: I.doc, title: 'Tax rules waiting for approval', help: 'Bills cannot be calculated until the tax rules are approved.', to: '/contracts', go: 'Open contracts', perm: 'tax.approve' },
   ] as Item[]).filter((i) => i.n > 0);
   const total = items.reduce((s, i) => s + i.n, 0);

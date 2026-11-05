@@ -10,6 +10,7 @@ import { resolveSession, SESSION_COOKIE } from './lib/auth.js';
 import { authRoutes } from './routes/auth.js';
 import { masterRoutes } from './routes/master.js';
 import { clientRoutes } from './routes/clients.js';
+import { extensionRoutes } from './routes/extensions.js';
 import { documentRoutes } from './routes/documents.js';
 import { rateRoutes } from './routes/rates.js';
 import { dutyRoutes } from './routes/duties.js';
@@ -55,6 +56,7 @@ export async function buildApp(db: Db, opts: { logger?: boolean } = {}): Promise
       await authRoutes(api);
       await masterRoutes(api);
       await clientRoutes(api);
+      await extensionRoutes(api);
       await documentRoutes(api);
       await rateRoutes(api);
       await dutyRoutes(api);

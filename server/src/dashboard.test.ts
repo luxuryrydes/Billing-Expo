@@ -50,7 +50,7 @@ afterAll(async () => { await app?.close(); await db?.close(); fs.rmSync(tmp, { r
 describe('dashboard numbers', () => {
   it('an empty system shows zeros, twelve empty months and an unfinished set-up', async () => {
     const d = await dash();
-    expect(d.attention).toEqual({ dutiesWithErrors: 0, slipsToSave: 0, dutiesToVerify: 0, billsToApprove: 0, ratesToApprove: 0, taxToApprove: 0, openExceptions: 0 });
+    expect(d.attention).toEqual({ dutiesWithErrors: 0, slipsToSave: 0, dutiesToVerify: 0, billsToApprove: 0, ratesToApprove: 0, taxToApprove: 0, openExceptions: 0, contractsEnding: 0 });
     expect(d.byMonth).toHaveLength(12);
     expect(d.byMonth[11].month).toBe(ym);
     expect(d.byMonth.every((m: any) => m.total === '0.00' || m.total === '0')).toBe(true);

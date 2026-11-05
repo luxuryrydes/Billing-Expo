@@ -32,6 +32,9 @@ const PRESETS: Record<string, any> = {
   'Contractual deduction': { code: 'DED', label: 'Deduction', scope: 'duty', kind: 'deduction', quantityExpr: '0', unit: '', taxCategory: 'taxable' },
 };
 
+/** Approved versions whose end date has passed are shown as Expired, so they are not mistaken for the rate in force. */
+const shownStatus = (v: any) => (v.status === 'approved' && v.effective_to && v.effective_to < new Date().toISOString().slice(0, 10) ? 'expired' : v.status);
+
 export function RateSchemesPage() {
   const clients = useClients();
   const [clientId, setClientId] = useState('');
@@ -46,6 +49,7 @@ export function RateSchemesPage() {
   const [pickContract, setPickContract] = useState(false);
   const [f, setF] = useState({ contract_id: '', name: '', description: '' });
   const [bulk, setBulk] = useState(false);
+  const [showRetired, setShowRetired] = useState(false);
   const [bulkResult, setBulkResult] = useState<{ approved: number; skipped: { id: string; reason: string }[] } | null>(null);
   const pendingIds: string[] = (q.data ?? []).flatMap((s) => (s.versions ?? []).filter((v: any) => v.status === 'pending_approval').map((v: any) => v.id));
   return (
@@ -54,6 +58,8 @@ export function RateSchemesPage() {
         <select value={clientId} onChange={(e) => { setClientId(e.target.value); setContractId(''); }}><option value="">All departments</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
         <select value={contractId} onChange={(e) => setContractId(e.target.value)}><option value="">All contracts</option>{contracts.data?.map((k) => <option key={k.id} value={k.id}>{k.reference_no}</option>)}</select>
         {can('rate.approve') && pendingIds.length > 0 && <button className="btn ok" onClick={() => { setBulkResult(null); setBulk(true); }}>Approve all pending ({pendingIds.length})</button>}
+        {can('rate.approve') && <button className="btn" title="Retires draft versions that repeat the same rates as another version of the scheme. Nothing is deleted." onClick={async () => { const r = await run(() => api.post('/rate-versions/cleanup-duplicates', {})); if (r) { alert(`${r.retired} duplicate draft version(s) retired.`); q.refetch(); } }}>Clean up duplicate drafts</button>}
+        <label className="check"><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} />Show retired</label>
         {can('rate.write') && <button className="btn" onClick={() => (contractId ? setImportFor(contractId) : setPickContract(true))}>Import rate card</button>}
         {can('rate.write') && <button className="btn primary" onClick={() => { setF({ contract_id: contractId, name: '', description: '' }); setAdding(true); }}>New scheme</button>}
       </PageHead>
@@ -65,7 +71,7 @@ export function RateSchemesPage() {
             <tbody>
               {q.data?.map((s) => (
                 <tr key={s.id}><td>{s.client_name}<div className="small muted">{s.reference_no}</div></td><td>{s.name}<div className="small muted">{s.description}</div></td>
-                  <td>{(s.versions ?? []).map((v: any) => <div key={v.id}><Link to={`/rates/versions/${v.id}`}>v{v.version_no}</Link> <Status s={v.status} /> <span className="small muted">{MODELS.find((m) => m[0] === v.billing_model)?.[1]} · {d(v.effective_from)} – {v.effective_to ? d(v.effective_to) : 'open'}</span></div>)}</td>
+                  <td>{(s.versions ?? []).filter((v: any) => showRetired || v.status !== 'retired').map((v: any) => <div key={v.id}><Link to={`/rates/versions/${v.id}`}>v{v.version_no}</Link> <Status s={shownStatus(v)} /> <span className="small muted">{MODELS.find((m) => m[0] === v.billing_model)?.[1]} · {d(v.effective_from)} – {v.effective_to ? d(v.effective_to) : 'open'}</span></div>)}</td>
                   <td>{can('rate.write') && <button className="btn sm" onClick={async () => { const r = await run(() => api.post(`/rate-schemes/${s.id}/versions`, { effective_from: new Date().toISOString().slice(0, 10), config: blankConfig() })); if (r) nav(`/rates/versions/${r.id}`); }}>New version</button>}</td></tr>
               ))}
               {q.data?.length === 0 && <tr><td colSpan={4} className="empty">No rate schemes.</td></tr>}

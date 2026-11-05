@@ -39,6 +39,8 @@ export async function reportRoutes(app: FastifyInstance) {
       `SELECT b.id, b.bill_no, b.status, b.grand_total, b.period_start, c.name AS client_name FROM bills b JOIN clients c ON c.id = b.client_id ORDER BY b.updated_at DESC LIMIT 8`);
     // --- the home screen: what needs attention, how this month is going, and how billing is trending ---------------
     const BILLED = `('approved','generated','submitted')`;
+    // Contracts that end within 60 days, or whose end date has passed without an extension: the date is the CURRENT end date, so an applied extension moves it.
+    const contractsEnding = (await db.one<{ n: number }>(`SELECT count(*)::int AS n FROM contracts WHERE status = 'active' AND end_date IS NOT NULL AND end_date <= current_date + interval '60 days'`))!.n;
     const [slipsToSave, ratesToApprove, taxToApprove, notBilled] = await Promise.all([
       one(`SELECT count(*)::int AS n FROM slip_readings r JOIN scan_pages p ON p.id = r.page_id WHERE r.status = 'read' AND r.duty_id IS NULL AND NOT p.deleted`),
       one(`SELECT count(*)::int AS n FROM rate_scheme_versions WHERE status = 'pending_approval'`),
@@ -63,9 +65,18 @@ export async function reportRoutes(app: FastifyInstance) {
     const pipelineRows = await db.query<{ stage: string; n: number }>(
       `SELECT CASE WHEN status IN ('draft','calculation_pending','validation_required') THEN 'preparing' WHEN status = 'under_review' THEN 'review' ELSE status END AS stage, count(*)::int AS n
        FROM bills WHERE status NOT IN ('cancelled','superseded') AND updated_at >= now() - interval '90 days' GROUP BY 1`);
-    const activity = await db.query(
-      `SELECT a.id, a.at, a.action, a.entity_type, u.name AS user_name FROM audit_events a LEFT JOIN app_users u ON u.id = a.user_id
-       WHERE a.action NOT IN ('login', 'logout') ORDER BY a.at DESC LIMIT 10`);
+    // One line per event: the summary row of a bulk approval is left out (each approval already has its own row), and
+    // the same person doing the same thing within two minutes (56 rates approved in a click) is shown once with a count.
+    const rawActivity = await db.query<{ id: string; at: string; action: string; entity_type: string; user_name: string | null; user_id: string | null }>(
+      `SELECT a.id, a.at, a.action, a.entity_type, a.user_id, u.name AS user_name FROM audit_events a LEFT JOIN app_users u ON u.id = a.user_id
+       WHERE a.action NOT IN ('login', 'logout', 'approve_all') ORDER BY a.at DESC LIMIT 400`);
+    const activity: (typeof rawActivity[number] & { count: number })[] = [];
+    for (const e of rawActivity) {
+      const last = activity[activity.length - 1];
+      if (last && last.user_id === e.user_id && last.action === e.action && last.entity_type === e.entity_type && new Date(last.at).getTime() - new Date(e.at).getTime() < 120_000) { last.count += 1; continue; }
+      if (activity.length >= 10) break;
+      activity.push({ ...e, count: 1 });
+    }
     const setup = await db.one<Record<string, number>>(
       `SELECT (SELECT count(*)::int FROM supplier_profiles) AS supplier, (SELECT count(*)::int FROM clients) AS clients,
               (SELECT count(*)::int FROM rate_scheme_versions WHERE status IN ('approved','pending_approval')) AS rates,
@@ -76,7 +87,7 @@ export async function reportRoutes(app: FastifyInstance) {
     return {
       counts: { clients, activeContracts, dutiesToday, dutiesEnteredToday, withErrors, awaitingVerification, billsPreparing, billsAwaitingApproval, billsGeneratedThisMonth, openExceptions, pendingEntry: pendingEntry.length },
       pendingEntry, monthly, recentDocs, recentBills,
-      attention: { dutiesWithErrors: withErrors, slipsToSave, dutiesToVerify: awaitingVerification, billsToApprove: billsAwaitingApproval, ratesToApprove, taxToApprove, openExceptions },
+      attention: { dutiesWithErrors: withErrors, slipsToSave, dutiesToVerify: awaitingVerification, billsToApprove: billsAwaitingApproval, ratesToApprove, taxToApprove, openExceptions, contractsEnding },
       month: {
         key: cur.month, billed: cur.total, billedPrev: prev?.total ?? '0', billedChangePct: prev ? pct(cur.total, prev.total) : null,
         bills: cur.bills, billsPrev: prev?.bills ?? 0, duties: duties?.cur ?? 0, dutiesPrev: duties?.prev ?? 0, dutiesChangePct: duties && duties.prev > 0 ? Math.round(((duties.cur - duties.prev) / duties.prev) * 1000) / 10 : null,

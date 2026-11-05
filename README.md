@@ -148,6 +148,18 @@ The format of the other LR Taxi Services billing app, available per department:
 
 Stop the app, then run (PowerShell): `$env:ADMIN_EMAIL='you@example.com'; $env:ADMIN_PASSWORD='a long password'; npm run set-admin --workspace server`. It creates the administrator, or resets the password of an existing user and makes them an active administrator. Start the app again, sign in, and add more users under **Users**. The password is read from the environment and is not stored in any file.
 
+### Calculated amounts on scanned slips
+
+In **Read & review**, every slip shows its **Amount (₹)**, worked out by the same engine as bills from the **approved** rate version in force on the duty date for that department's contract, vehicle category and duty type (draft, rejected, expired or not-yet-effective versions are never used). Click the amount to see the approved rate, included km/hours, extra quantities, each charge with its formula, tax and the final amount. If no approved rate applies or a reading is missing, the slip says **Needs review** and no amount is shown. The amount follows every edit on screen. The Excel export carries the calculated amounts (read-only) and is recalculated after upload. When slips are saved as duties, the calculation, the rate version used and its number are stored with the duty (`duty_calculations`); approving a newer rate later does not change them, and re-saving the same batch updates the same duties.
+
+### Contract extensions
+
+**Contracts -> a contract -> Extensions**: upload the department's extension letter (PDF, JPG or PNG). The software reads the letter number and date, department, contract/bid number, the existing end date, the extension start and the new end date, and works out the additional period (years, months, days). Nothing changes until a person presses **Approve & Apply Contract Extension**: dates can be corrected first, conflicts are shown (a new date not after the current end, a stated end date that differs from the contract, gaps or overlaps, a letter number already applied, an unusually long extension), and warnings need an explicit confirmation. Applying moves the contract's current end date (used by Daily Duty Entry, Duty Register, billing and the scanning matcher), keeps the original end date, records the dates it replaced, puts an expired contract back to active when the new end date is ahead, and is written to the audit log. Several extensions can be applied in turn; each letter is stored and can be downloaded, and the same file or letter number cannot be applied twice. The Dashboard lists contracts ending within 60 days (by the current end date). Reading needs `ANTHROPIC_API_KEY`; without it, the dates are typed by hand.
+
+### Rate approvals
+
+Each rate version can be approved only once (the approval is checked under a database lock), and the Dashboard activity shows one line per event, with repeats such as a bulk approval folded into "(N times)". **Clean up duplicate drafts** on Rate Schemes retires draft versions that repeat the rates of an approved, pending or earlier draft version of the same scheme (nothing is deleted; they can be shown with **Show retired**). Approved versions whose end date has passed are labelled **Expired**.
+
 ### Protecting the data
 
 Every start of the app copies the embedded database folder to `data/backups/auto-YYYYMMDD-HHMM` (at most every 12 hours, newest 7 kept), and closing the console window now shuts the database down cleanly. If `data/pglite` ever stops opening, stop all copies of the app, rename it to `data/pglite-damaged`, copy the newest `data/backups/auto-…` folder to `data/pglite`, and start again. Always stop the app with Ctrl+C or by closing its window; never end the process from Task Manager.

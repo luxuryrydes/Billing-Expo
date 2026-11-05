@@ -4,7 +4,8 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, errorText } from '../api';
 import { useAuth } from '../auth';
 import { useContracts } from '../lookups';
-import { ErrorBox, Field, Loading, PageHead, Status, Tabs, useAction, useToast } from '../components/ui';
+import { ErrorBox, Field, Loading, Modal, PageHead, Status, Tabs, useAction, useToast } from '../components/ui';
+import { inr } from '../format';
 
 type Tab = 'pages' | 'review' | 'save';
 interface FieldDef { key: string; label: string; kind: string }
@@ -69,9 +70,10 @@ export function ScanSlipsPage() {
     refetchInterval: (q) => (q.state.data?.batch?.status === 'scanning' ? 1500 : false),
   });
   const [tab, setTab] = useState<Tab>('pages');
+  const [dutyType, setDutyType] = useState('LOCAL');   // the duty type used to pick the rate, for the amounts and for saving
   const [autoBatch, setAutoBatch] = useState('');   // a batch whose pages should be read by AI as soon as scanning ends
   const open = (id: string) => setSp(id ? { batch: id } : {});
-  const reload = () => { qc.invalidateQueries({ queryKey: ['scan-batch', batchId] }); qc.invalidateQueries({ queryKey: ['scan-batches'] }); };
+  const reload = () => { qc.invalidateQueries({ queryKey: ['scan-batch', batchId] }); qc.invalidateQueries({ queryKey: ['scan-batches'] }); qc.invalidateQueries({ queryKey: ['scan-calc'] }); };
 
   useEffect(() => {
     if (autoBatch && autoBatch === batchId && detail.data?.batch?.status === 'ready') setTab('review');
@@ -104,8 +106,8 @@ export function ScanSlipsPage() {
             <BatchHeader d={detail.data} reload={reload} />
             <Tabs<Tab> tabs={[['pages', `1. Pages (${detail.data.pages.filter((p: any) => !p.deleted).length})`], ['review', '2. Read & review'], ['save', '3. Save as duties & bill']]} value={tab} onChange={setTab} />
             {tab === 'pages' && <PagesTab d={detail.data} status={st} reload={reload} />}
-            {tab === 'review' && <ReviewTab d={detail.data} status={st} reload={reload} autoRead={autoBatch === batchId && autoBatch !== ''} onAutoStarted={() => setAutoBatch('')} />}
-            {tab === 'save' && <SaveTab d={detail.data} reload={reload} />}
+            {tab === 'review' && <ReviewTab d={detail.data} status={st} reload={reload} dutyType={dutyType} setDutyType={setDutyType} autoRead={autoBatch === batchId && autoBatch !== ''} onAutoStarted={() => setAutoBatch('')} />}
+            {tab === 'save' && <SaveTab d={detail.data} reload={reload} dutyType={dutyType} setDutyType={setDutyType} />}
           </>
         )}
       </div>
@@ -306,7 +308,7 @@ function PageViewer({ page, index, count, status, busy, run, reload, move }: { p
 }
 
 // --- step 2: read and review ---------------------------------------------------------------------
-function ReviewTab({ d, status, reload, autoRead, onAutoStarted }: { d: any; status: any; reload: () => void; autoRead?: boolean; onAutoStarted?: () => void }) {
+function ReviewTab({ d, status, reload, dutyType, setDutyType, autoRead, onAutoStarted }: { d: any; status: any; reload: () => void; dutyType: string; setDutyType: (v: string) => void; autoRead?: boolean; onAutoStarted?: () => void }) {
   const fields: FieldDef[] = status?.fields ?? [];
   const pages: any[] = d.pages.filter((p: any) => !p.deleted);
   const contracts = useContracts();
@@ -315,6 +317,8 @@ function ReviewTab({ d, status, reload, autoRead, onAutoStarted }: { d: any; sta
   const cur = pages.find((p) => p.id === sel) ?? pages[0];
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const { run } = useAction();
+  const calc = useQuery({ queryKey: ['scan-calc', d.batch.id, dutyType], queryFn: () => api.get<Record<string, any>>(`/scan/batches/${d.batch.id}/calculations?dutyType=${encodeURIComponent(dutyType || 'LOCAL')}`) });
+  const [showCalc, setShowCalc] = useState<{ page: number; c: any } | null>(null);
   const todo = pages.filter((p) => p.reading.status !== 'read');
   const readAll = async (list: any[], force = false) => {
     setProgress({ done: 0, total: list.length });
@@ -352,11 +356,12 @@ function ReviewTab({ d, status, reload, autoRead, onAutoStarted }: { d: any; sta
         <a className="btn" href={`/api/scan/batches/${d.batch.id}/export.xlsx`}>Download Excel</a>
         <label className="btn">Upload edited Excel<input type="file" accept=".xlsx" style={{ display: 'none' }} onChange={(e) => { importXlsx(e.target.files?.[0]); e.target.value = ''; }} /></label>
       </div>
+      <div className="row" style={{ marginBottom: 6 }}><Field label="Duty type used to pick the rate" hint="Amounts follow the approved rate for this department, vehicle type, duty type and date"><input value={dutyType} onChange={(e) => setDutyType(e.target.value)} style={{ width: 140 }} /></Field></div>
       <div className="small muted" style={{ marginBottom: 6 }}>Values are shown as the AI read them. <span style={{ background: '#fff3cd', padding: '0 4px' }}>Amber</span> = unsure, check against the slip. Type over any value; <span style={{ background: '#e6f4ea', padding: '0 4px' }}>green</span> = corrected by you. Nothing becomes a duty until you save it in step 3.</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.7fr) minmax(260px, 1fr)', gap: 12 }}>
         <div className="scroll" style={{ maxHeight: '68vh' }}>
           <table className="t" style={{ minWidth: 2400 }}>
-            <thead><tr><th>Pg</th><th>Status</th><th>Contract</th>{fields.map((f) => <th key={f.key}>{f.label}</th>)}</tr></thead>
+            <thead><tr><th>Pg</th><th>Status</th><th>Amount (₹)</th><th>Contract</th>{fields.map((f) => <th key={f.key}>{f.label}</th>)}</tr></thead>
             <tbody>
               {pages.map((p, i) => {
                 const r = p.reading;
@@ -364,6 +369,9 @@ function ReviewTab({ d, status, reload, autoRead, onAutoStarted }: { d: any; sta
                   <tr key={p.id} onClick={() => setSel(p.id)} style={{ background: cur?.id === p.id ? 'var(--brand-soft)' : undefined }}>
                     <td><b>{i + 1}</b></td>
                     <td>{r.status === 'read' ? (r.dutyId ? <span className="badge ok" title="Saved as a duty">saved</span> : <span className="badge">read</span>) : r.status === 'failed' ? <span className="badge err" title={r.error}>failed</span> : <span className="badge warn">{r.status}</span>}</td>
+                    <td className="nowrap">{r.status !== 'read' ? <span className="muted">—</span> : !calc.data ? <span className="muted">…</span> : calc.data[r.id]?.status === 'ok'
+                      ? <button className="btn sm" title="Show how this amount was calculated" onClick={(e) => { e.stopPropagation(); setShowCalc({ page: i + 1, c: calc.data![r.id] }); }}><b>{inr(calc.data[r.id].totals.subtotal)}</b>{Number(calc.data[r.id].totals.tax) > 0 && <span className="small muted"> +tax {inr(calc.data[r.id].totals.tax)}</span>}</button>
+                      : <button className="btn sm" style={{ background: '#fff3cd' }} title={calc.data[r.id]?.message ?? ''} onClick={(e) => { e.stopPropagation(); setShowCalc({ page: i + 1, c: calc.data![r.id] }); }}>Needs review</button>}</td>
                     <td><select value={r.contractId ?? ''} onChange={(e) => saveContract(r.id, e.target.value, run, reload)} style={{ maxWidth: 150 }}><option value="">Match by department</option>{(contracts.data ?? []).filter((k) => k.status === 'active').map((k) => <option key={k.id} value={k.id}>{k.client_name} — {k.reference_no}</option>)}</select></td>
                     {fields.map((f) => <Cell key={f.key + (r.edited?.[f.key] ?? '') + (r.fields?.[f.key]?.value ?? '')} def={f} value={r.values?.[f.key] ?? ''} edited={r.edited?.[f.key] !== undefined} confidence={r.fields?.[f.key]?.confidence ?? 1} onSave={(v) => saveCell(r.id, f.key, v)} />)}
                   </tr>
@@ -380,10 +388,37 @@ function ReviewTab({ d, status, reload, autoRead, onAutoStarted }: { d: any; sta
           </>}
         </div>
       </div>
+      {showCalc && <CalcModal page={showCalc.page} c={showCalc.c} onClose={() => setShowCalc(null)} />}
     </>
   );
 }
 const saveContract = async (id: string, contractId: string, run: any, reload: () => void) => { await run(() => api.put(`/scan/readings/${id}`, { contractId: contractId || null })); reload(); };
+
+const VAR_LABELS: [string, string][] = [['actual_km', 'Total km'], ['billable_km', 'Billable km'], ['extra_km', 'Extra km'], ['duration_hours', 'Duty hours'], ['billable_hours', 'Billable hours'], ['extra_hours', 'Extra hours'], ['night_count', 'Nights']];
+function CalcModal({ page, c, onClose }: { page: number; c: any; onClose: () => void }) {
+  return (
+    <Modal title={`How the amount for page ${page} was calculated`} onClose={onClose} wide>
+      {c.status !== 'ok' ? (
+        <div className="alert warn">This slip needs review, so no amount is shown: {c.message}</div>
+      ) : (
+        <>
+          <p className="small">Approved rate used: <b>{c.schemeName}</b>, version {c.versionNo}, effective from {c.effectiveFrom}. It is saved with the duty when you save it, and later rate changes do not alter it.</p>
+          <p className="small muted">{VAR_LABELS.filter(([k]) => c.variables?.[k] !== undefined).map(([k, l]) => `${l} ${c.variables[k]}`).join(' · ')}</p>
+          <table className="t"><thead><tr><th>Charge</th><th className="num">Quantity</th><th className="num">Rate (₹)</th><th className="num">Amount (₹)</th><th>Calculation</th></tr></thead>
+            <tbody>{c.lines.map((l: any, i: number) => <tr key={i}><td>{l.label}<div className="small muted">{l.taxCategory === 'taxable' ? 'Taxable' : 'Not taxable'}</div></td><td className="num">{l.quantity} {l.unit}</td><td className="num">{inr(l.rate)}</td><td className="num">{inr(l.amount)}</td><td className="small mono">{l.formula}</td></tr>)}
+              {c.lines.length === 0 && <tr><td colSpan={5} className="muted">No charges apply.</td></tr>}</tbody>
+            <tfoot>
+              <tr><td colSpan={3}>Total before tax</td><td className="num">{inr(c.totals.subtotal)}</td><td /></tr>
+              {c.taxLines.map((x: any, i: number) => <tr key={i}><td colSpan={3}>{x.name} ({x.rate}%)</td><td className="num">{inr(x.amount)}</td><td /></tr>)}
+              <tr><td colSpan={3}><b>Final amount</b></td><td className="num"><b>{inr(c.totals.total)}</b></td><td /></tr>
+            </tfoot></table>
+          {c.message && <div className="alert info" style={{ marginTop: 8 }}>{c.message}</div>}
+        </>
+      )}
+      <div className="row end" style={{ marginTop: 10 }}><button className="btn primary" onClick={onClose}>Close</button></div>
+    </Modal>
+  );
+}
 
 function Cell({ def, value, edited, confidence, onSave }: { def: FieldDef; value: string; edited: boolean; confidence: number; onSave: (v: string) => void }) {
   const [v, setV] = useState(value);
@@ -398,10 +433,9 @@ function Cell({ def, value, edited, confidence, onSave }: { def: FieldDef; value
 }
 
 // --- step 3: save as duties, then bill -----------------------------------------------------------
-function SaveTab({ d, reload }: { d: any; reload: () => void }) {
+function SaveTab({ d, reload, dutyType, setDutyType }: { d: any; reload: () => void; dutyType: string; setDutyType: (v: string) => void }) {
   const { run, busy } = useAction();
   const nav = useNavigate();
-  const [dutyType, setDutyType] = useState('LOCAL');
   const [res, setRes] = useState<any>(null);
   const pages: any[] = d.pages.filter((p: any) => !p.deleted);
   const readCount = pages.filter((p) => p.reading.status === 'read').length;

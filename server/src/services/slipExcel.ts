@@ -4,6 +4,7 @@
  */
 import ExcelJS from 'exceljs';
 import type { Db } from '../db/index.js';
+import type { CalcPreview } from './slipCalc.js';
 import { audit } from '../lib/audit.js';
 import { badRequest } from '../lib/http.js';
 import { effectiveValues, type ReadingRow } from './slipDuty.js';
@@ -11,23 +12,25 @@ import { SLIP_FIELDS } from './slipReader.js';
 
 const ID_HEADER = 'Row ID';
 
-export async function exportSlipsXlsx(title: string, rows: { reading: ReadingRow; position: number }[]): Promise<Buffer> {
+const CALC_HEADERS = ['Calculated amount before tax (₹)', 'Calculated total with tax (₹)', 'Approved rate used', 'Calculation status'];
+
+export async function exportSlipsXlsx(title: string, rows: { reading: ReadingRow; position: number; calc?: CalcPreview }[]): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'LR Billing';
   const ws = wb.addWorksheet('Duty slips');
   ws.addRow([`Duty slips — ${title}`]).font = { bold: true, size: 12 };
-  ws.addRow(['Correct any cell and import the sheet back. Do not change or delete the Row ID column; only cells you change are applied, and nothing is saved as a duty until you save it in the software.']).font = { italic: true, size: 9 };
-  const header = ws.addRow([ID_HEADER, 'Page', 'Low confidence', ...SLIP_FIELDS.map((f) => f.label)]);
+  ws.addRow(['Correct any cell and import the sheet back. The last four columns (calculated amount, with tax, rate used, status) are worked out by the software and are recalculated when you import the sheet; changing them has no effect. Do not change or delete the Row ID column; only cells you change are applied, and nothing is saved as a duty until you save it in the software.']).font = { italic: true, size: 9 };
+  const header = ws.addRow([ID_HEADER, 'Page', 'Low confidence', ...SLIP_FIELDS.map((f) => f.label), ...CALC_HEADERS]);
   header.font = { bold: true };
   header.alignment = { wrapText: true, vertical: 'middle' };
   header.eachCell((c) => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEDEDED' } }; c.border = { bottom: { style: 'thin' } }; });
-  for (const { reading, position } of rows) {
+  for (const { reading, position, calc } of rows) {
     const v = effectiveValues(reading);
     const low = SLIP_FIELDS.filter((f) => v[f.key] && reading.edited?.[f.key] === undefined && (reading.fields?.[f.key]?.confidence ?? 1) < 0.6).map((f) => f.label).join(', ');
-    const r = ws.addRow([reading.id, position, low, ...SLIP_FIELDS.map((f) => v[f.key] ?? '')]);
-    r.eachCell((c, i) => { if (i > 3) c.numFmt = '@'; }); // text, so vehicle numbers, dates and times stay as read
+    const r = ws.addRow([reading.id, position, low, ...SLIP_FIELDS.map((f) => v[f.key] ?? ''), calc?.status === 'ok' && calc.totals ? Number(calc.totals.subtotal) : '', calc?.status === 'ok' && calc.totals ? Number(calc.totals.total) : '', calc?.schemeName ? `${calc.schemeName} v${calc.versionNo}` : '', calc ? (calc.status === 'ok' ? 'Calculated' : `Needs review: ${calc.message ?? ''}`) : '']);
+    r.eachCell((c, i) => { if (i > 3 && i <= 3 + SLIP_FIELDS.length) c.numFmt = '@'; }); // text, so vehicle numbers, dates and times stay as read
   }
-  ws.columns = [{ width: 38 }, { width: 6 }, { width: 22 }, ...SLIP_FIELDS.map((f) => ({ width: f.kind === 'text' ? 22 : 13 }))];
+  ws.columns = [{ width: 38 }, { width: 6 }, { width: 22 }, ...SLIP_FIELDS.map((f) => ({ width: f.kind === 'text' ? 22 : 13 })), { width: 16 }, { width: 16 }, { width: 30 }, { width: 40 }];
   ws.getColumn(1).hidden = false;
   ws.views = [{ state: 'frozen', xSplit: 3, ySplit: 3 }];
   return Buffer.from(await wb.xlsx.writeBuffer());

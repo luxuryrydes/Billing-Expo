@@ -219,6 +219,26 @@ export async function rateRoutes(app: FastifyInstance) {
     return db.tx((t) => approveVersion(t, id, req.user!.id, note));
   });
 
+  /**
+   * Retires draft versions that repeat another version of the same scheme (same rates, vehicle categories, duty types) which is already
+   * approved, waiting for approval, or an earlier draft. Nothing is deleted and nothing approved is touched; each one is recorded.
+   */
+  app.post('/rate-versions/cleanup-duplicates', { preHandler: perm('rate.approve') }, async (req) => {
+    const dupes = await db.query<{ id: string; scheme_id: string; version_no: number }>(
+      `SELECT d.id, d.scheme_id, d.version_no FROM rate_scheme_versions d
+       WHERE d.status = 'draft' AND EXISTS (
+         SELECT 1 FROM rate_scheme_versions o
+         WHERE o.scheme_id = d.scheme_id AND o.id <> d.id AND o.config = d.config
+           AND o.vehicle_category_ids = d.vehicle_category_ids AND o.duty_type_codes = d.duty_type_codes
+           AND ((o.status IN ('approved', 'pending_approval') AND o.effective_from <= d.effective_from AND (o.effective_to IS NULL OR o.effective_to >= d.effective_from))
+             OR (o.status = 'draft' AND o.version_no < d.version_no AND o.effective_from = d.effective_from)))`);
+    for (const v of dupes) {
+      await db.query(`UPDATE rate_scheme_versions SET status = 'retired' WHERE id = $1 AND status = 'draft'`, [v.id]);
+      await audit(db, req.user!.id, 'rate_version', v.id, 'retire_duplicates', { status: 'draft' }, { status: 'retired' }, 'Same rates as another version of this scheme');
+    }
+    return { retired: dupes.length };
+  });
+
   /** Approve many pending versions at once. Each one goes through the normal approval checks on its own; the ones that fail are listed, not hidden. */
   app.post('/rate-versions/approve-all', { preHandler: perm('rate.approve') }, async (req) => {
     const b = parse(z.object({ ids: z.array(z.string().uuid()).min(1).max(2000), note: optText }), req.body);

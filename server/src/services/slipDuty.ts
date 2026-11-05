@@ -10,6 +10,7 @@ import { matchClient, type ClientKeyRow } from './departmentRates.js';
 import { parseDate, parseNumber, parseTime } from './import.js';
 import { SLIP_FIELDS, type FieldRead } from './slipReader.js';
 import type { ValidationSettings } from '../engine/validate.js';
+import { previewCalculation, saveCalculation } from './slipCalc.js';
 
 export type Values = Record<string, string | null>;
 export interface ReadingRow { id: string; page_id: string; batch_id: string; status: string; fields: Record<string, FieldRead>; edited: Record<string, string | null>; contract_id: string | null; duty_id: string | null }
@@ -167,6 +168,7 @@ export async function saveReadings(db: Db, userId: string, batch: { id: string; 
         results.push({ ...base, action: 'update', dutyId: String(existing.id), issues, changes });
         if (!o.dryRun) {
           await updateDuty(t, merged, c.k, issues, userId);
+          await saveCalculation(t, String(existing.id), await previewCalculation(t, merged), userId);
           await audit(t, userId, 'duty', String(existing.id), 'scan_update', undefined, { batch: batch.id, reading: r.id, changes });
           await t.query('UPDATE slip_readings SET duty_id = $2, contract_id = $3, updated_at = now() WHERE id = $1', [r.id, existing.id, built.contractId]);
         }
@@ -177,6 +179,7 @@ export async function saveReadings(db: Db, userId: string, batch: { id: string; 
       const row = await insertDuty(t, built.input, c.k, issues, userId, 'import');
       taken.add(String(row!.id));
       await audit(t, userId, 'duty', String(row!.id), 'scan_import', undefined, { batch: batch.id, reading: r.id });
+      await saveCalculation(t, String(row!.id), await previewCalculation(t, built.input), userId);
       await t.query('UPDATE slip_readings SET duty_id = $2, contract_id = $3, updated_at = now() WHERE id = $1', [r.id, row!.id, built.contractId]);
       results.push({ ...base, action: 'add', dutyId: String(row!.id), issues });
     }

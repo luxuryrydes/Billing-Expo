@@ -8,6 +8,7 @@ import { d } from '../format';
 import { useClients, useContracts, useSuppliers } from '../lookups';
 import { ImportDialog } from '../components/ImportDialog';
 import { DocumentList, DocumentUploader } from '../components/DocumentUploader';
+import { ContractExtensions } from '../components/ContractExtensions';
 
 const DEFAULT = {
   client_id: '', supplier_profile_id: null, title: '', reference_no: '', po_number: '', start_date: '', end_date: '', billing_frequency: 'monthly', status: 'draft',
@@ -115,7 +116,7 @@ export function ContractsPage() {
           <table className="t">
             <thead><tr><th>Department</th><th>Contract</th><th>Reference</th><th>Validity</th><th>Status</th></tr></thead>
             <tbody>
-              {q.data?.map((k) => <tr key={k.id}><td>{k.client_name}</td><td><Link to={`/contracts/${k.id}`}>{k.title}</Link></td><td>{k.reference_no}</td><td>{d(k.start_date)} – {k.end_date ? d(k.end_date) : 'open'}</td><td><Status s={k.status} /></td></tr>)}
+              {q.data?.map((k) => <tr key={k.id}><td>{k.client_name}</td><td><Link to={`/contracts/${k.id}`}>{k.title}</Link></td><td>{k.reference_no}</td><td>{d(k.start_date)} – {k.end_date ? d(k.end_date) : 'open'}{k.original_end_date && <div className="small muted">extended from {d(k.original_end_date)}</div>}</td><td><Status s={k.status} /></td></tr>)}
               {q.data?.length === 0 && <tr><td colSpan={5} className="empty">No contracts yet.</td></tr>}
             </tbody>
           </table>
@@ -126,7 +127,7 @@ export function ContractsPage() {
   );
 }
 
-type Tab = 'overview' | 'tax' | 'rates' | 'docs' | 'terms' | 'templates';
+type Tab = 'overview' | 'tax' | 'rates' | 'extensions' | 'docs' | 'terms' | 'templates';
 
 export function ContractDetailPage() {
   const { id } = useParams();
@@ -139,11 +140,11 @@ export function ContractDetailPage() {
   const k = q.data;
   return (
     <>
-      <PageHead title={k.title} sub={<><Link to={`/clients/${k.client_id}`}>{k.client_name}</Link> · {k.reference_no} · {d(k.start_date)} – {k.end_date ? d(k.end_date) : 'open'} · <Status s={k.status} /></>}>
+      <PageHead title={k.title} sub={<><Link to={`/clients/${k.client_id}`}>{k.client_name}</Link> · {k.reference_no} · {d(k.start_date)} – {k.end_date ? d(k.end_date) : 'open'}{k.original_end_date && <span className="muted"> (extended; originally {d(k.original_end_date)})</span>} · <Status s={k.status} /></>}>
         {can('client.write') && <button className="btn" onClick={() => setEditing(true)}>Edit contract</button>}
         <Link className="btn primary" to={`/billing?contract=${k.id}`}>Prepare bill</Link>
       </PageHead>
-      <Tabs<Tab> tabs={[['overview', 'Overview'], ['tax', `Tax rules (${k.taxRules.length})`], ['rates', `Rate schemes (${k.schemes.length})`], ['docs', `Documents (${k.documents.length})`], ['terms', 'Extracted terms'], ['templates', `Bill templates (${k.templates.length})`]]} value={tab} onChange={setTab} />
+      <Tabs<Tab> tabs={[['overview', 'Overview'], ['tax', `Tax rules (${k.taxRules.length})`], ['rates', `Rate schemes (${k.schemes.length})`], ['extensions', k.original_end_date ? 'Extensions ●' : 'Extensions'], ['docs', `Documents (${k.documents.length})`], ['terms', 'Extracted terms'], ['templates', `Bill templates (${k.templates.length})`]]} value={tab} onChange={setTab} />
       {tab === 'overview' && (
         <div className="grid g3">
           <div className="panel"><h3>Invoice</h3>
@@ -158,6 +159,7 @@ export function ContractDetailPage() {
       )}
       {tab === 'tax' && <TaxRules contractId={k.id} clientId={k.client_id} startDate={k.start_date} rules={k.taxRules} reload={q.refetch} />}
       {tab === 'rates' && <SchemesList contractId={k.id} contractLabel={`${k.client_name} — ${k.reference_no}`} schemes={k.schemes} reload={q.refetch} />}
+      {tab === 'extensions' && <ContractExtensions contractId={k.id} onChanged={q.refetch} />}
       {tab === 'docs' && <ContractDocuments clientId={k.client_id} contractId={k.id} />}
       {tab === 'terms' && <ExtractedTerms contractId={k.id} />}
       {tab === 'templates' && (
