@@ -271,7 +271,8 @@ export function matchClient(clients: ClientKeyRow[], name: string, extraKeys: (s
   const exact = clients.filter((c) => k(c.name) === k(name) || (c.aliases ?? []).some((a) => k(a) === k(name)));
   if (exact.length === 1) return { client: exact[0], how: 'name' };
   if (exact.length > 1) return { ambiguous: exact };
-  const keys = [parenAbbr(name), ...extraKeys].map(k).filter(Boolean);
+  // The name itself can be a department's short code too (a slip that just says "SAIL").
+  const keys = [parenAbbr(name), name, ...extraKeys].map(k).filter(Boolean);
   const hit = (c: ClientKeyRow) => keys.some((x) => x === k(c.code) || x === k(c.short_code) || x === k(c.name) || x === k(parenAbbr(c.name)) || (c.aliases ?? []).some((a) => k(a) === x));
   const found = clients.filter(hit);
   if (found.length === 1) return { client: found[0], how: 'code or alias' };

@@ -70,8 +70,9 @@ export async function eligibleDuties(db: Db, bill: BillRow) {
   return rows;
 }
 
-function toRenderDuty(r: Record<string, unknown>): RenderDuty {
+export function toRenderDuty(r: Record<string, unknown>): RenderDuty {
   return {
+    schemeId: (r.rate_scheme_id as string) ?? null,
     id: String(r.id), dutyDate: String(r.duty_date), vehicleRegNo: String(r.vehicle_reg_no), vehicleCategoryId: (r.vehicle_category_id as string) ?? null,
     vehicleCategoryName: (r.vehicle_category_name as string) ?? null, dutyTypeCode: (r.duty_type_code as string) ?? null,
     startKm: (r.start_km as string) ?? null, endKm: (r.end_km as string) ?? null,

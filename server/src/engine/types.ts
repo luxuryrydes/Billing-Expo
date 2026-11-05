@@ -103,6 +103,8 @@ export interface DutyInput {
   parking: string | null;
   otherCharges: string | null;
   customFields?: Record<string, unknown>;
+  /** A rate card (rate scheme) chosen for this duty; only versions of that scheme are considered. */
+  schemeId?: string | null;
 }
 
 export interface TraceInfo {

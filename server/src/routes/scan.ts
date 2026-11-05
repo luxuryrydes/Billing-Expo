@@ -14,11 +14,17 @@ import { badRequest, conflict, notFound, parse, uuid } from '../lib/http.js';
 import { checkUpload, loadFile, saveFile } from '../lib/storage.js';
 import { cancelScan, listScanners, scan, scannerBusy, scannerStatus, ScannerError, type ScanOptions } from '../services/scanner.js';
 import { readSlip, SLIP_FIELDS } from '../services/slipReader.js';
-import { buildDuty, effectiveValues, loadLookups, saveReadings, type ReadingRow } from '../services/slipDuty.js';
+import { buildDuty, effectiveValues, loadLookups, matchDepartment, saveReadings, type ReadingRow } from '../services/slipDuty.js';
 import { previewCalculation, type CalcPreview } from '../services/slipCalc.js';
 import { exportSlipsXlsx, importSlipsXlsx } from '../services/slipExcel.js';
 
 const IMAGE_EXT = ['.jpg', '.jpeg', '.png'];
+
+/** A slip's calculation plus who it belongs to and which rate card applies. */
+type SlipCalc = CalcPreview & {
+  match: { clientId: string | null; clientName: string | null; contractId: string | null; contractRef: string | null; contractTitle: string | null; matched: boolean };
+  rateSchemeId: string | null; rateCardName: string | null; rateCardChosen: boolean; vehicleCategoryId: string | null; dutyDate: string | null;
+};
 const ScanSettings = z.object({
   deviceId: z.string().min(1),
   mode: z.enum(['color', 'gray', 'bw']).default('color'),
@@ -277,13 +283,33 @@ export async function scanRoutes(app: FastifyInstance) {
     const rows = await db.query<ReadingRow & { position: number }>(
       `SELECT r.*, p.position FROM slip_readings r JOIN scan_pages p ON p.id = r.page_id WHERE r.batch_id = $1 AND NOT p.deleted ORDER BY p.position`, [id]);
     const lookups = await loadLookups(db);
-    const out: Record<string, CalcPreview> = {};
+    const contractInfo = new Map((await db.query<{ id: string; reference_no: string; title: string }>('SELECT id, reference_no, title FROM contracts')).map((k) => [k.id, k]));
+    const schemeName = new Map((await db.query<{ id: string; name: string }>('SELECT id, name FROM rate_schemes')).map((x) => [x.id, x.name]));
+    const out: Record<string, SlipCalc> = {};
     for (const r of rows) {
       if (r.status !== 'read') continue;
-      const built = buildDuty(effectiveValues(r), { contractId: r.contract_id, lookups, batchTitle: batch.title, position: r.position, defaultDutyType: dutyType || null });
-      out[r.id] = built.input
-        ? await previewCalculation(db, built.input)
+      const values = effectiveValues(r);
+      const built = buildDuty(values, { contractId: r.contract_id, lookups, batchTitle: batch.title, position: r.position, defaultDutyType: dutyType || null });
+      const dutyDate = built.input?.dutyDate ?? null;
+      // Who the slip belongs to: the department record the name matches, never the AI's spelling.
+      const hit = values.department ? matchDepartment(lookups, values.department, dutyDate) : null;
+      const contractId = built.contractId ?? hit?.contractId ?? null;
+      const contractClient = contractId ? lookups.contracts.find((k) => k.id === contractId)?.client_id ?? null : null;
+      const clientId = contractClient ?? hit?.clientId ?? null;
+      const clientName = clientId ? lookups.clients.find((c) => c.id === clientId)?.name ?? hit?.clientName ?? null : null;
+      const k = contractId ? contractInfo.get(contractId) : null;
+      const preview: CalcPreview = built.input
+        ? await previewCalculation(db, built.input, r.rate_scheme_id ?? null)
         : { status: 'review', message: built.problems.filter((p) => p.severity === 'error').map((p) => p.message).join(' ') || 'Some values are missing.', schemeVersionId: null, schemeName: null, versionNo: null, effectiveFrom: null, lines: [], taxLines: [], totals: null, variables: {} };
+      out[r.id] = {
+        ...preview,
+        match: { clientId, clientName, contractId, contractRef: k?.reference_no ?? null, contractTitle: k?.title ?? null, matched: !!clientId },
+        rateSchemeId: r.rate_scheme_id ?? null,
+        rateCardName: r.rate_scheme_id ? schemeName.get(r.rate_scheme_id) ?? null : preview.schemeName,
+        rateCardChosen: !!r.rate_scheme_id,
+        vehicleCategoryId: built.input?.vehicleCategoryId ?? null,
+        dutyDate,
+      };
     }
     return out;
   }
@@ -291,6 +317,54 @@ export async function scanRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const { dutyType } = parse(z.object({ dutyType: z.string().trim().max(40).default('LOCAL') }), req.query ?? {});
     return batchCalculations(id, dutyType);
+  });
+
+  /**
+   * Approved rate cards a slip can use: schemes with an approved version that has not ended, for the given contracts.
+   * Whether a card fits a particular slip (vehicle category, duty type, date) is checked when it is applied.
+   */
+  app.get('/scan/rate-cards', { preHandler: perm('view') }, async (req) => {
+    const { contractIds } = parse(z.object({ contractIds: z.string().default('') }), req.query ?? {});
+    const ids = contractIds.split(',').map((x) => x.trim()).filter((x) => /^[0-9a-f-]{36}$/i.test(x));
+    if (!ids.length) return [];
+    return db.query(
+      `SELECT s.id AS scheme_id, s.name, s.contract_id, k.reference_no AS contract_ref, v.id AS version_id, v.version_no, v.effective_from, v.effective_to,
+              v.config->>'billingModel' AS billing_model, v.duty_type_codes,
+              COALESCE((SELECT array_agg(vc.name ORDER BY vc.name) FROM vehicle_categories vc WHERE vc.id = ANY(v.vehicle_category_ids)), '{}') AS categories
+       FROM rate_schemes s JOIN contracts k ON k.id = s.contract_id
+       JOIN rate_scheme_versions v ON v.scheme_id = s.id AND v.status = 'approved' AND (v.effective_to IS NULL OR v.effective_to >= current_date)
+       WHERE s.contract_id = ANY($1::uuid[]) ORDER BY k.reference_no, s.name, v.version_no DESC`, [ids]);
+  });
+
+  /** Applies one rate card to many slips. Each slip is checked first; a slip the card does not fit is left as it was and reported. */
+  app.post('/scan/batches/:id/apply-rate-card', { preHandler: write }, async (req) => {
+    const { id } = req.params as { id: string };
+    const b = parse(z.object({ readingIds: z.array(uuid).min(1).max(1000), schemeId: uuid.nullable(), dutyType: z.string().trim().max(40).default('LOCAL') }), req.body);
+    const batch = await db.one<{ id: string; title: string }>('SELECT id, title FROM scan_batches WHERE id = $1', [id]);
+    if (!batch) throw notFound('Scan batch');
+    const scheme = b.schemeId ? await db.one<{ id: string; name: string; contract_id: string }>('SELECT id, name, contract_id FROM rate_schemes WHERE id = $1', [b.schemeId]) : null;
+    if (b.schemeId && !scheme) throw notFound('Rate card');
+    const rows = await db.query<ReadingRow & { position: number }>(
+      `SELECT r.*, p.position FROM slip_readings r JOIN scan_pages p ON p.id = r.page_id WHERE r.batch_id = $1 AND NOT p.deleted AND r.id = ANY($2::uuid[]) ORDER BY p.position`, [id, b.readingIds]);
+    const lookups = await loadLookups(db);
+    const applied: { readingId: string; amount: string | null }[] = [];
+    const skipped: { readingId: string; page: number; reason: string }[] = [];
+    for (const r of rows) {
+      const built = buildDuty(effectiveValues(r), { contractId: r.contract_id, lookups, batchTitle: batch.title, position: r.position, defaultDutyType: b.dutyType || null });
+      if (!built.input) { skipped.push({ readingId: r.id, page: r.position, reason: built.problems.filter((p) => p.severity === 'error').map((p) => p.message).join(' ') || 'The slip is incomplete.' }); continue; }
+      let amount: string | null = null;
+      if (scheme) {
+        if (built.input.contractId !== scheme.contract_id) { skipped.push({ readingId: r.id, page: r.position, reason: 'This rate card belongs to a different contract than the one this slip is on.' }); continue; }
+        const p = await previewCalculation(db, built.input, scheme.id);
+        if (p.status !== 'ok') { skipped.push({ readingId: r.id, page: r.position, reason: p.message ?? 'The rate card does not apply to this slip.' }); continue; }
+        amount = p.totals?.subtotal ?? null;
+      }
+      await db.query('UPDATE slip_readings SET rate_scheme_id = $2, updated_at = now() WHERE id = $1', [r.id, scheme?.id ?? null]);
+      await audit(db, req.user!.id, 'slip_reading', r.id, 'set_rate_card', { rate_scheme_id: r.rate_scheme_id ?? null }, { rate_scheme_id: scheme?.id ?? null }, scheme?.name);
+      applied.push({ readingId: r.id, amount });
+    }
+    const total = applied.reduce((a, x) => a + Math.round(Number(x.amount ?? 0) * 100), 0) / 100;
+    return { applied: applied.length, skipped, total: total.toFixed(2), rateCard: scheme?.name ?? null };
   });
 
   // --- Excel -----------------------------------------------------------------------------------

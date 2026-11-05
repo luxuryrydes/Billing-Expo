@@ -15,6 +15,7 @@ export interface CalcPreview {
   status: 'ok' | 'review';
   message: string | null;
   schemeVersionId: string | null;
+  schemeId?: string | null;
   schemeName: string | null;
   versionNo: number | null;
   effectiveFrom: string | null;
@@ -26,7 +27,7 @@ export interface CalcPreview {
 
 const empty = (message: string, extra: Partial<CalcPreview> = {}): CalcPreview => ({ status: 'review', message, schemeVersionId: null, schemeName: null, versionNo: null, effectiveFrom: null, variables: {}, lines: [], taxLines: [], totals: null, ...extra });
 
-export async function previewCalculation(db: Db, d: DutyInputT): Promise<CalcPreview> {
+export async function previewCalculation(db: Db, d: DutyInputT, schemeId: string | null = null): Promise<CalcPreview> {
   const k = await db.one<Record<string, string>>('SELECT tax_mode, tax_level, invoice_rounding, arithmetic, client_id FROM contracts WHERE id = $1', [d.contractId]);
   if (!k) return empty('The contract could not be found.');
   if (!d.startKm || !d.endKm) return empty('Opening and closing km are needed before the amount can be calculated.');
@@ -50,7 +51,7 @@ export async function previewCalculation(db: Db, d: DutyInputT): Promise<CalcPre
       periodStart: d.dutyDate, periodEnd: d.dutyDate, schemes, taxRules, settings,
       duties: [{
         id: 'preview', dutyDate: d.dutyDate, vehicleRegNo: d.vehicleRegNo, vehicleCategoryId: d.vehicleCategoryId ?? null, vehicleCategoryName: category,
-        dutyTypeCode: d.dutyTypeCode ?? null, startKm: d.startKm ?? null, endKm: d.endKm ?? null, startAt: d.startAt ?? null, endAt: d.endAt ?? null,
+        schemeId, dutyTypeCode: d.dutyTypeCode ?? null, startKm: d.startKm ?? null, endKm: d.endKm ?? null, startAt: d.startAt ?? null, endAt: d.endAt ?? null,
         toll: d.toll ?? null, parking: d.parking ?? null, otherCharges: d.otherCharges ?? null, customFields: d.customFields ?? {},
       }],
     });
@@ -69,7 +70,7 @@ export async function previewCalculation(db: Db, d: DutyInputT): Promise<CalcPre
   return {
     status: 'ok',
     message: out.exceptions.length ? out.exceptions.map((e) => e.message).join(' ') : null,
-    schemeVersionId: v.id, schemeName: v.schemeName, versionNo: v.versionNo, effectiveFrom: v.effectiveFrom,
+    schemeVersionId: v.id, schemeId: v.schemeId, schemeName: v.schemeName, versionNo: v.versionNo, effectiveFrom: v.effectiveFrom,
     variables: res.variables,
     lines: dutyLines.map((l) => ({ label: l.label, quantity: l.quantity, unit: l.unit, rate: l.rate, amount: l.amount, kind: l.kind, taxCategory: l.taxCategory, formula: l.trace.formula, inputs: l.trace.inputs, scope: l.scope })),
     taxLines: out.taxLines.map((x) => ({ name: x.name, rate: x.rate, amount: x.amount })),

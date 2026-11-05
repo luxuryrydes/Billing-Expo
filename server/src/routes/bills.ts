@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import type { Db } from '../db/index.js';
 import { z } from 'zod';
 import { audit } from '../lib/audit.js';
 import { perm } from '../lib/auth.js';
@@ -6,6 +7,7 @@ import { badRequest, conflict, forbidden, isoDate, notFound, optText, parse, uui
 import { addDays } from '../engine/time.js';
 import { calculate, EDITABLE_STATUSES, eligibleDuties, FINAL_STATUSES, generateOutputs, getBill, isStale, nextBillNo } from '../services/billing.js';
 import { getSetting } from './master.js';
+import { invoicePreview, periodDuties } from '../services/invoiceBuilder.js';
 
 export async function billRoutes(app: FastifyInstance) {
   const db = app.db;
@@ -32,26 +34,27 @@ export async function billRoutes(app: FastifyInstance) {
     contract_id: uuid, period_start: isoDate, period_end: isoDate, bill_date: isoDate.optional(), template_version_id: uuid.nullable().optional(),
     include_unverified: z.boolean().default(true), notes: optText, period_type: z.enum(['month', 'date', 'range']).optional(),
   });
-  const createBill = async (b: z.infer<typeof NewBill>, userId: string) => {
+  const createBill = async (b: z.infer<typeof NewBill>, userId: string, opts: { db?: Db; allowOverlap?: boolean } = {}) => {
+    const q = opts.db ?? db;
     if (b.period_end < b.period_start) throw badRequest('Period end is before period start');
-    const k = await db.one<{ client_id: string; status: string }>('SELECT client_id, status FROM contracts WHERE id = $1', [b.contract_id]);
+    const k = await q.one<{ client_id: string; status: string }>('SELECT client_id, status FROM contracts WHERE id = $1', [b.contract_id]);
     if (!k) throw notFound('Contract');
-    const dup = await db.one<{ id: string; status: string; period_start: string; period_end: string }>(
+    const dup = await q.one<{ id: string; status: string; period_start: string; period_end: string }>(
       `SELECT id, status, period_start, period_end FROM bills WHERE contract_id = $1 AND status NOT IN ('cancelled','superseded') AND period_start <= $3 AND period_end >= $2 LIMIT 1`, [b.contract_id, b.period_start, b.period_end]);
-    if (dup) throw conflict(`A ${dup.status} bill (${dup.period_start} – ${dup.period_end}) already covers part of this period. Open it, or cancel it first.`);
+    if (dup && !opts.allowOverlap) throw conflict(`A ${dup.status} bill (${dup.period_start} – ${dup.period_end}) already covers part of this period. Open it, or cancel it first.`);
     const isMonth = b.period_start.endsWith('-01') && b.period_start.slice(0, 7) === b.period_end.slice(0, 7) && addDays(b.period_end, 1).endsWith('-01');
     const periodType = b.period_type ?? (b.period_start === b.period_end ? 'date' : isMonth ? 'month' : 'range');
     // Default template: latest approved version for the contract, else for the client.
-    const tv = b.template_version_id ?? (await db.one<{ id: string }>(
+    const tv = b.template_version_id ?? (await q.one<{ id: string }>(
       `SELECT v.id FROM billing_template_versions v JOIN billing_templates t ON t.id = v.template_id
        WHERE v.status = 'approved' AND (t.contract_id = $1 OR (t.contract_id IS NULL AND t.client_id = $2)) ORDER BY (t.contract_id IS NOT NULL) DESC, v.approved_at DESC LIMIT 1`,
       [b.contract_id, k.client_id]))?.id ?? null;
-    const row = await db.one<{ id: string }>(
+    const row = await q.one<{ id: string }>(
       `INSERT INTO bills(client_id, contract_id, period_start, period_end, period_type, bill_date, template_version_id, include_unverified, notes, created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [k.client_id, b.contract_id, b.period_start, b.period_end, periodType, b.bill_date ?? addDays(b.period_end, 1), tv, b.include_unverified, b.notes, userId],
     );
-    await audit(db, userId, 'bill', row!.id, 'create', undefined, { ...b, period_type: periodType });
+    await audit(q, userId, 'bill', row!.id, 'create', undefined, { ...b, period_type: periodType });
     return row!;
   };
 
@@ -305,4 +308,64 @@ export async function billRoutes(app: FastifyInstance) {
     await audit(db, req.user!.id, 'bill', id, 'cancel', undefined, undefined, reason);
     return { status: 'cancelled' };
   });
+  // --- Department-wise invoices ------------------------------------------------------------------------------------
+  const BuilderBase = z.object({ contractId: uuid, periodStart: isoDate, periodEnd: isoDate });
+
+  /** Saved duties of a contract and period, with how each stands for billing and what it would come to. */
+  app.get('/invoice-builder/duties', { preHandler: perm('view') }, async (req) => {
+    const q = parse(BuilderBase.extend({ schemeId: uuid.optional() }), req.query);
+    const rows = await periodDuties(db, q.contractId, q.periodStart, q.periodEnd);
+    const open = rows.filter((r) => r.bill_state === 'unbilled' || r.bill_state === 'cancelled');
+    const { perDuty, summary } = await invoicePreview(db, q.contractId, q.periodStart, q.periodEnd, open);
+    return {
+      duties: rows.map((r) => {
+        const p = perDuty.get(r.id);
+        const applied = p?.schemeId ?? null;
+        return {
+          id: r.id, dutyDate: r.duty_date, vehicleRegNo: r.vehicle_reg_no, vehicleCategory: r.vehicle_category_name ?? null, dutyType: r.duty_type_code ?? null,
+          startKm: r.start_km, endKm: r.end_km, fieldOfficer: r.field_officer ?? null, state: r.bill_state, billNo: r.bill_no, billId: r.bill_id,
+          chosenRateCard: r.chosen_rate_card ?? null, rateCard: p?.schemeName ?? null, rateSchemeId: applied, amount: p?.amount ?? null, message: p?.message ?? null,
+          eligible: (r.bill_state === 'unbilled' || r.bill_state === 'cancelled') && !!p?.ok && (!q.schemeId || applied === q.schemeId),
+        };
+      }),
+      summary,
+    };
+  });
+
+  /** What the chosen duties would come to, before an invoice is made. */
+  app.post('/invoice-builder/summary', { preHandler: perm('view') }, async (req) => {
+    const b = parse(BuilderBase.extend({ dutyIds: z.array(uuid).max(2000) }), req.body);
+    const rows = (await periodDuties(db, b.contractId, b.periodStart, b.periodEnd)).filter((r) => b.dutyIds.includes(r.id) && (r.bill_state === 'unbilled' || r.bill_state === 'cancelled'));
+    return (await invoicePreview(db, b.contractId, b.periodStart, b.periodEnd, rows)).summary;
+  });
+
+  /**
+   * Makes one invoice (a draft bill) from the chosen saved duties of one contract. The duties are claimed for the bill inside one
+   * transaction under a lock, and the database allows a duty on only one active bill, so a repeated click or a second user cannot bill the
+   * same duty twice. The invoice then goes through the normal review, approval and export steps.
+   */
+  app.post('/invoice-builder/generate', { preHandler: perm('bill.prepare') }, async (req) => {
+    const b = parse(BuilderBase.extend({ dutyIds: z.array(uuid).min(1, 'Select at least one duty').max(2000), billDate: isoDate.optional(), templateVersionId: uuid.nullable().optional() }), req.body);
+    if (b.periodEnd < b.periodStart) throw badRequest('Period end is before period start');
+    const userId = req.user!.id;
+    const bill = await db.tx(async (t) => {
+      await t.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`invoice:${b.contractId}`]);
+      const all = await periodDuties(t, b.contractId, b.periodStart, b.periodEnd);
+      const byId = new Map(all.map((r) => [r.id, r]));
+      const missing = b.dutyIds.filter((id) => !byId.has(id));
+      if (missing.length) throw badRequest(`${missing.length} selected duty(ies) are not in this contract and period, or were voided.`);
+      const taken = b.dutyIds.map((id) => byId.get(id)!).filter((r) => r.bill_state === 'billed' || r.bill_state === 'draft');
+      if (taken.length) throw conflict(`${taken.length} selected duty(ies) are already on a bill (${[...new Set(taken.map((r) => r.bill_no ?? 'a draft bill'))].join(', ')}). Deselect them.`);
+      const chosen = new Set(b.dutyIds);
+      const excluded = all.filter((r) => !chosen.has(r.id)).map((r) => ({ dutyId: r.id, reason: 'Not selected for this invoice', by: userId, at: new Date().toISOString() }));
+      const created = await createBill({ contract_id: b.contractId, period_start: b.periodStart, period_end: b.periodEnd, bill_date: b.billDate, template_version_id: b.templateVersionId ?? null, include_unverified: true, notes: 'Department-wise invoice from selected duties', period_type: 'range' }, userId, { db: t, allowOverlap: true });
+      await t.query('UPDATE bills SET excluded_duties = $2::jsonb WHERE id = $1', [created.id, JSON.stringify(excluded)]);
+      for (const id of b.dutyIds) await t.query('INSERT INTO bill_duties(bill_id, duty_id, active) VALUES ($1,$2,true)', [created.id, id]);
+      await audit(t, userId, 'bill', created.id, 'invoice_from_duties', undefined, { duties: b.dutyIds.length, excluded: excluded.length });
+      return created;
+    });
+    const calc = await calculate(db, bill.id, userId);
+    return { billId: bill.id, duties: b.dutyIds.length, totals: calc.totals, exceptions: calc.exceptions };
+  });
+
 }

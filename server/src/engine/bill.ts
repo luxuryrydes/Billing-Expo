@@ -60,7 +60,8 @@ function covers(from: string, to: string | null, date: string): boolean {
 
 /** Picks the single approved, effective scheme version for a duty, preferring the most specific match. */
 export function selectScheme(duty: DutyInput, schemes: SchemeVersion[]): { version?: SchemeVersion; error?: CalcException } {
-  const candidates = schemes.filter(
+  const pool = duty.schemeId ? schemes.filter((s) => s.schemeId === duty.schemeId) : schemes;
+  const candidates = pool.filter(
     (s) =>
       s.status === 'approved' &&
       covers(s.effectiveFrom, s.effectiveTo, duty.dutyDate) &&
@@ -73,7 +74,9 @@ export function selectScheme(duty: DutyInput, schemes: SchemeVersion[]): { versi
         dutyId: duty.id,
         code: 'NO_RATE',
         severity: 'error',
-        message: `No approved rate scheme is effective on ${duty.dutyDate} for vehicle category "${duty.vehicleCategoryName ?? 'not set'}" and duty type "${duty.dutyTypeCode ?? 'not set'}".`,
+        message: duty.schemeId
+          ? `The rate card chosen for this duty (${schemes.find((s) => s.schemeId === duty.schemeId)?.schemeName ?? 'unknown'}) is not an approved rate effective on ${duty.dutyDate} for vehicle category "${duty.vehicleCategoryName ?? 'not set'}" and duty type "${duty.dutyTypeCode ?? 'not set'}".`
+          : `No approved rate scheme is effective on ${duty.dutyDate} for vehicle category "${duty.vehicleCategoryName ?? 'not set'}" and duty type "${duty.dutyTypeCode ?? 'not set'}".`,
       },
     };
   }
