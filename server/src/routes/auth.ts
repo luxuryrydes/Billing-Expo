@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { getSetting } from './master.js';
+import { APP_VERSION } from '../version.js';
 import { audit } from '../lib/audit.js';
 import {
   createSession, destroySession, hashPassword, perm, requireUser, ROLE_PERMISSIONS, SESSION_COOKIE,
@@ -33,6 +34,7 @@ export async function authRoutes(app: FastifyInstance) {
       user: req.user ?? null,
       permissions: shown,
       approvalsRequired: approvals,
+      version: APP_VERSION,
     };
   });
 

@@ -3,13 +3,13 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError } from './api';
 
 export interface Me { id: string; email: string; name: string; role: string }
-interface AuthState { user: Me | null; permissions: string[]; needsSetup: boolean; approvalsRequired: boolean; can: (p: string) => boolean; refresh: () => void }
+interface AuthState { user: Me | null; permissions: string[]; needsSetup: boolean; approvalsRequired: boolean; version: string; can: (p: string) => boolean; refresh: () => void }
 
-const Ctx = createContext<AuthState>({ user: null, permissions: [], needsSetup: false, approvalsRequired: false, can: () => false, refresh: () => {} });
+const Ctx = createContext<AuthState>({ user: null, permissions: [], needsSetup: false, approvalsRequired: false, version: '2.0', can: () => false, refresh: () => {} });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ['auth'], queryFn: () => api.get<{ user: Me | null; permissions: string[]; needsSetup: boolean; approvalsRequired?: boolean }>('/auth/status'), staleTime: 60_000 });
+  const q = useQuery({ queryKey: ['auth'], queryFn: () => api.get<{ user: Me | null; permissions: string[]; needsSetup: boolean; approvalsRequired?: boolean; version?: string }>('/auth/status'), staleTime: 60_000 });
   if (q.isLoading) return <div className="empty">Loading…</div>;
   if (q.error || !q.data) {
     // The server explains its own setup problems (e.g. a missing database setting on the host).
@@ -28,6 +28,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     permissions: s.permissions,
     needsSetup: s.needsSetup,
     approvalsRequired: !!s.approvalsRequired,
+    version: (s.version ?? '2.0.0').split('.').slice(0, 2).join('.'),
     can: (p) => s.permissions.includes(p),
     refresh: () => qc.invalidateQueries(),
   };

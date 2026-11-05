@@ -11,6 +11,7 @@ import { authRoutes } from './routes/auth.js';
 import { masterRoutes } from './routes/master.js';
 import { clientRoutes } from './routes/clients.js';
 import { extensionRoutes } from './routes/extensions.js';
+import { APP_NAME, APP_VERSION } from './version.js';
 import { getSetting } from './routes/master.js';
 import { settleApprovals } from './services/autoApprove.js';
 import { documentRoutes } from './routes/documents.js';
@@ -55,6 +56,7 @@ export async function buildApp(db: Db, opts: { logger?: boolean } = {}): Promise
   await app.register(
     async (api) => {
       api.get('/health', async () => ({ ok: true }));
+      api.get('/version', async () => ({ name: APP_NAME, version: APP_VERSION }));
       // Approvals are not required (default): what was just uploaded or saved is used straight away. Runs before the answer is sent, so the
       // screen that refreshes next already sees the result.
       // Opening the pages that list these items also settles anything still waiting (for example items uploaded before approvals were switched off).

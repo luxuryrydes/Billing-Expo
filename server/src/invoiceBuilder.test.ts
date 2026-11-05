@@ -171,3 +171,25 @@ describe('department-wise slips and invoices', () => {
     expect(rows.every((r) => r.scheme_version_id === v)).toBe(true);
   });
 });
+
+describe('deleting an invoice', () => {
+  it('removes only the invoice: its duties can be billed again, and departments, rate cards and tax rules are untouched', async () => {
+    const counts = async () => (await db.one<Record<string, number>>(`SELECT (SELECT count(*)::int FROM clients) AS clients, (SELECT count(*)::int FROM rate_scheme_versions) AS rates, (SELECT count(*)::int FROM tax_rules) AS tax, (SELECT count(*)::int FROM duties) AS duties`))!;
+    const before = await counts();
+    const sailBills = await db.query<{ id: string }>(`SELECT id FROM bills WHERE contract_id = $1 ORDER BY created_at`, [ctx.sail.contract]);
+    expect(sailBills.length).toBeGreaterThanOrEqual(2);
+    expect((await call('POST', `/bills/${sailBills[0].id}/delete`, { reason: 'Test' }, 'approver', false)).status).toBe(403);   // only people with the delete permission
+    expect((await call('POST', `/bills/${sailBills[0].id}/delete`, { reason: '' }, 'admin', false)).status).toBe(400);   // a reason is needed
+    const r = (await call('POST', `/bills/${sailBills[0].id}/delete`, { reason: 'Wrong period' })).body;
+    expect(r.deleted).toBe(sailBills[0].id);
+    expect(await db.one('SELECT 1 FROM bills WHERE id = $1', [sailBills[0].id])).toBeNull();
+    expect(await counts()).toEqual(before);   // not one department, rate, tax rule or duty was deleted
+    const free = (await call('GET', `/invoice-builder/duties?contractId=${ctx.sail.contract}&periodStart=2026-05-01&periodEnd=2026-05-31`)).body.duties.filter((d: any) => d.eligible);
+    expect(free.length).toBeGreaterThanOrEqual(2);   // the released duties can go on a new invoice
+    const log = await db.one<{ action: string; reason: string | null }>(`SELECT action, note AS reason FROM audit_events WHERE entity_type = 'bill' AND entity_id = $1 AND action = 'delete'`, [sailBills[0].id]).catch(() => null);
+    expect(log).not.toBeNull();
+    const many = (await call('POST', '/bills/delete-many', { ids: sailBills.slice(1).map((b) => b.id), reason: 'Clean up' })).body;
+    expect(many.deleted).toBe(sailBills.length - 1);
+    expect(await counts()).toEqual(before);
+  });
+});

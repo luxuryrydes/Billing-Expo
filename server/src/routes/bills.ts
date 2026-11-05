@@ -327,6 +327,55 @@ export async function billRoutes(app: FastifyInstance) {
     await audit(db, req.user!.id, 'bill', id, 'cancel', undefined, undefined, reason);
     return { status: 'cancelled' };
   });
+  /**
+   * Deletes an invoice (a bill) for good: its lines, snapshot, files list and exceptions go. Nothing else is touched: the duties return to
+   * "not billed" and can be billed again, and departments, contracts, rate cards, tax rules and templates are never affected. The bill's number,
+   * total and the reason are kept in the audit log. A bill that has revisions cannot be deleted until they are.
+   */
+  async function deleteBill(id: string, userId: string, reason: string) {
+    const bill = await getBill(db, id);
+    const kids = await db.one<{ n: number }>('SELECT count(*)::int AS n FROM bills WHERE revision_of = $1', [id]);
+    if (kids!.n > 0) throw conflict('This bill has revisions. Delete the revisions first.');
+    await db.tx(async (t) => {
+      const duties = (await t.query<{ duty_id: string }>('SELECT duty_id FROM bill_duties WHERE bill_id = $1', [id])).map((r) => r.duty_id);
+      // Cancelling first is what lets the protection of approved bills step aside; then the duties are released.
+      await t.query(`UPDATE bills SET status = 'cancelled', updated_at = now() WHERE id = $1`, [id]);
+      await t.query('UPDATE bill_duties SET active = false WHERE bill_id = $1', [id]);
+      if (duties.length) {
+        await t.query(
+          `UPDATE duties SET status = CASE WHEN verified_by IS NOT NULL THEN 'verified' ELSE 'entered' END, updated_at = updated_at
+           WHERE id = ANY($1::uuid[]) AND status = 'billed' AND NOT EXISTS (SELECT 1 FROM bill_duties bd WHERE bd.duty_id = duties.id AND bd.active AND bd.bill_id <> $2)`, [duties, id]);
+      }
+      if (bill.revision_of) {
+        // A deleted revision gives the original back.
+        const orig = await t.one<{ status: string }>('SELECT status FROM bills WHERE id = $1', [bill.revision_of]);
+        if (orig?.status === 'superseded') {
+          await t.query(`UPDATE bills SET status = 'approved', updated_at = now() WHERE id = $1`, [bill.revision_of]);
+          await t.query('UPDATE bill_duties SET active = true WHERE bill_id = $1', [bill.revision_of]);
+        }
+      }
+      await audit(t, userId, 'bill', id, 'delete', { bill_no: bill.bill_no, status: bill.status, grand_total: (bill as unknown as { grand_total?: string }).grand_total ?? null, period: `${bill.period_start} – ${bill.period_end}`, duties: duties.length }, undefined, reason);
+      await t.query('DELETE FROM bills WHERE id = $1', [id]);
+    });
+    return { deleted: id, billNo: bill.bill_no };
+  }
+  app.post('/bills/:id/delete', { preHandler: perm('bill.delete') }, async (req) => {
+    const { id } = req.params as { id: string };
+    const b = parse(z.object({ reason: z.string().trim().min(3, 'Give a short reason').max(300) }), req.body);
+    return deleteBill(id, req.user!.id, b.reason);
+  });
+  app.post('/bills/delete-many', { preHandler: perm('bill.delete') }, async (req) => {
+    const b = parse(z.object({ ids: z.array(uuid).min(1).max(500), reason: z.string().trim().min(3, 'Give a short reason').max(300) }), req.body);
+    let deleted = 0;
+    const skipped: { id: string; reason: string }[] = [];
+    // Newest first, so a revision goes before the bill it revised.
+    const rows = await db.query<{ id: string; revision_no: number }>('SELECT id, revision_no FROM bills WHERE id = ANY($1::uuid[]) ORDER BY revision_no DESC, created_at DESC', [b.ids]);
+    for (const r of rows) {
+      try { await deleteBill(r.id, req.user!.id, b.reason); deleted++; } catch (e) { skipped.push({ id: r.id, reason: (e as Error).message }); }
+    }
+    return { deleted, skipped };
+  });
+
   // --- Department-wise invoices ------------------------------------------------------------------------------------
   const BuilderBase = z.object({ contractId: uuid, periodStart: isoDate, periodEnd: isoDate });
   /** Tax on amounts entered by hand: the contract's approved rules (default), none, or a rate typed on the invoice. */

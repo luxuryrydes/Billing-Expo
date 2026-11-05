@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, fileUrl, qs } from '../api';
 import { useAuth } from '../auth';
-import { ErrorBox, Field, Loading, Modal, PageHead, Status, Tabs, useAction } from '../components/ui';
+import { Confirm, ErrorBox, Field, Loading, Modal, PageHead, Status, Tabs, useAction } from '../components/ui';
 import { DutyImportWizard } from '../components/DutyImportWizard';
 import { d, inr, monthRange, STATUS_LABEL, thisMonth } from '../format';
 import { useClients, useContracts } from '../lookups';
@@ -44,6 +44,10 @@ export function BillsPage() {
 }
 
 function InvoiceList() {
+  const { can } = useAuth();
+  const { run, busy } = useAction();
+  const [pick, setPick] = useState<Set<string>>(new Set());
+  const [asking, setAsking] = useState(false);
   const [sp, setSp] = useSearchParams();
   const clients = useClients();
   const f = { clientId: sp.get('clientId') ?? '', status: sp.get('status') ?? '' };
@@ -55,21 +59,32 @@ function InvoiceList() {
         <select value={f.clientId} onChange={(e) => set('clientId', e.target.value)}><option value="">All departments</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
         <select value={f.status} onChange={(e) => set('status', e.target.value)}><option value="">Any status</option>{['draft', 'calculation_pending', 'validation_required', 'under_review', 'approved', 'generated', 'submitted', 'superseded', 'cancelled'].map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select>
       </div>
+      {can('bill.delete') && pick.size > 0 && (
+        <div className="alert warn row" style={{ marginBottom: 10 }}>
+          <b>{pick.size} invoice(s) selected</b>
+          <span className="small">Deleting removes only the invoices; their duties can be billed again, and departments, rate cards and tax rules are never deleted.</span>
+          <span className="spacer" />
+          <button className="btn sm" onClick={() => setPick(new Set())}>Clear</button>
+          <button className="btn danger" disabled={busy} onClick={() => setAsking(true)}>Delete selected</button>
+        </div>
+      )}
+      {asking && <Confirm text={`Delete ${pick.size} invoice(s) for good? Their duties go back to not billed.`} needReason="Reason for deleting" yesLabel="Delete" danger onClose={() => setAsking(false)}
+        onYes={async (reason) => { setAsking(false); const r = await run(() => api.post<any>('/bills/delete-many', { ids: [...pick], reason }), 'Deleted'); if (r) { setPick(new Set()); if (r.skipped.length) alert(`${r.skipped.length} could not be deleted: ${r.skipped[0].reason}`); q.refetch(); } }} />}
       <ErrorBox error={q.error} />
       <div className="panel tight">
         {q.isLoading ? <Loading /> : (
           <div className="scroll">
             <table className="t">
-              <thead><tr><th>Bill no.</th><th>Department</th><th>Contract</th><th>Period</th><th className="num">Duties</th><th className="num">Taxable</th><th className="num">Tax</th><th className="num">Total</th><th>Status</th><th>Download</th></tr></thead>
+              <thead><tr>{can('bill.delete') && <th style={{ width: 28 }}><input type="checkbox" aria-label="Select all" checked={!!q.data?.length && pick.size === q.data.length} onChange={(e) => setPick(e.target.checked ? new Set((q.data ?? []).map((x) => x.id)) : new Set())} /></th>}<th>Bill no.</th><th>Department</th><th>Contract</th><th>Period</th><th className="num">Duties</th><th className="num">Taxable</th><th className="num">Tax</th><th className="num">Total</th><th>Status</th><th>Download</th></tr></thead>
               <tbody>
                 {q.data?.map((b) => (
-                  <tr key={b.id}><td><Link to={`/billing/${b.id}`}>{b.bill_no ?? 'Draft'}</Link>{b.revision_no > 0 && <span className="badge brand"> Rev {b.revision_no}</span>}</td><td>{b.client_name}</td><td>{b.contract_ref}</td>
+                  <tr key={b.id}>{can('bill.delete') && <td><input type="checkbox" aria-label={`Select ${b.bill_no ?? 'draft'}`} checked={pick.has(b.id)} onChange={(e) => setPick((p) => { const n = new Set(p); if (e.target.checked) n.add(b.id); else n.delete(b.id); return n; })} /></td>}<td><Link to={`/billing/${b.id}`}>{b.bill_no ?? 'Draft'}</Link>{b.revision_no > 0 && <span className="badge brand"> Rev {b.revision_no}</span>}</td><td>{b.client_name}</td><td>{b.contract_ref}</td>
                     <td className="nowrap">{b.period_type === 'date' ? <>{d(b.period_start)} <span className="badge">date-wise</span></> : <>{d(b.period_start)} – {d(b.period_end)}</>}</td>
                     <td className="num">{b.duty_count}</td><td className="num">{inr(b.taxable_value)}</td><td className="num">{inr(b.tax_total)}</td><td className="num"><b>{inr(b.grand_total)}</b></td>
                     <td><Status s={b.status} />{b.paid_at && <span className="badge ok" title={`Paid on ${b.paid_at}`}> Paid</span>}{b.open_exceptions > 0 && <span className="badge err"> {b.open_exceptions} open</span>}</td>
                     <td className="nowrap">{b.pdf_file_id ? <><a className="btn sm" href={fileUrl(b.pdf_file_id)}>PDF</a> <a className="btn sm" href={fileUrl(b.xlsx_file_id)}>Excel</a></> : <span className="small muted">after approval</span>}</td></tr>
                 ))}
-                {q.data?.length === 0 && <tr><td colSpan={10} className="empty">No bills yet.</td></tr>}
+                {q.data?.length === 0 && <tr><td colSpan={11} className="empty">No bills yet.</td></tr>}
               </tbody>
             </table>
           </div>

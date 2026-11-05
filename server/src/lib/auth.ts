@@ -12,7 +12,7 @@ export const PERMISSIONS = [
   'rate.write', 'rate.approve', 'tax.write', 'tax.approve',
   'template.write', 'template.approve',
   'duty.write', 'duty.verify', 'duty.correct',
-  'bill.prepare', 'bill.review', 'bill.approve', 'bill.submit',
+  'bill.prepare', 'bill.review', 'bill.approve', 'bill.submit', 'bill.delete',
   'user.admin', 'settings.write',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];

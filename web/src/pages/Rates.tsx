@@ -8,7 +8,7 @@ import { d, inr } from '../format';
 import { useCategories, useClients, useContracts, useDutyTypes } from '../lookups';
 import { blankConfig } from './Contracts';
 import { ImportDialog } from '../components/ImportDialog';
-import { ApproveExistingButton, cardStatus, TaxConfigButton, TaxPanel, taxLabel, taxTone } from '../components/RateCardAdmin';
+import { ApproveExistingButton, cardStatus, TaxConfigButton, TaxPanel, taxLabel } from '../components/RateCardAdmin';
 
 const MODELS: [string, string][] = [
   ['daily_package', 'Daily package (km + hours)'], ['monthly_package', 'Monthly vehicle hire'], ['monthly_limit', 'Monthly km/hour limit + excess'],
@@ -62,7 +62,7 @@ export function RateSchemesPage() {
         {can('rate.manage') && <TaxConfigButton schemes={q.data ?? []} onDone={() => q.refetch()} />}
         {can('rate.approve') && pendingIds.length > 0 && <button className="btn" onClick={() => { setBulkResult(null); setBulk(true); }}>Approve all pending ({pendingIds.length})</button>}
         {can('rate.manage') && <button className="btn" title="Retires draft versions that repeat the same rates as another version of the scheme. Nothing is deleted." onClick={async () => { const r = await run(() => api.post('/rate-versions/cleanup-duplicates', {})); if (r) { alert(`${r.retired} duplicate draft version(s) retired.`); q.refetch(); } }}>Clean up duplicate drafts</button>}
-        <label className="check"><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} />Show retired</label>
+        <label className="check"><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} />Show old versions</label>
         {can('rate.write') && <button className="btn" onClick={() => (contractId ? setImportFor(contractId) : setPickContract(true))}>Import rate card</button>}
         {can('rate.write') && <button className="btn primary" onClick={() => { setF({ contract_id: contractId, name: '', description: '' }); setAdding(true); }}>New scheme</button>}
       </PageHead>
@@ -75,7 +75,7 @@ export function RateSchemesPage() {
               {q.data?.map((s) => (
                 <tr key={s.id}><td>{s.client_name}<div className="small muted">{s.reference_no}</div></td><td>{s.name}<div className="small muted">{s.description}</div></td>
                   <td><span className={`badge ${cardStatus(s.versions ?? []) === 'Approved' ? 'ok' : cardStatus(s.versions ?? []) === 'Pending' ? 'warn' : ''}`}>{cardStatus(s.versions ?? [])}</span></td>
-                  <td>{(s.versions ?? []).filter((v: any) => showRetired || v.status !== 'retired').map((v: any) => <div key={v.id}><Link to={`/rates/versions/${v.id}`}>v{v.version_no}</Link> <Status s={shownStatus(v)} /> <span className="small muted">{MODELS.find((m) => m[0] === v.billing_model)?.[1]} · {d(v.effective_from)} – {v.effective_to ? d(v.effective_to) : 'open'}</span> <span className={`badge ${taxTone(v.tax)}`} title="Tax setting of this rate card">{taxLabel(v.tax)}</span></div>)}</td>
+                  <td>{(s.versions ?? []).filter((v: any) => showRetired || !['retired', 'rejected'].includes(v.status) && shownStatus(v) !== 'expired').map((v: any) => <div key={v.id}><Link to={`/rates/versions/${v.id}`}>v{v.version_no}</Link> <Status s={shownStatus(v)} /> <span className="small muted">{MODELS.find((m) => m[0] === v.billing_model)?.[1]} · {d(v.effective_from)} – {v.effective_to ? d(v.effective_to) : 'open'}</span> {v.tax && <span className="badge ok" title="Tax setting of this rate card">{taxLabel(v.tax)}</span>}</div>)}</td>
                   <td>{can('rate.write') && <button className="btn sm" onClick={async () => { const r = await run(() => api.post(`/rate-schemes/${s.id}/versions`, { effective_from: new Date().toISOString().slice(0, 10), config: blankConfig() })); if (r) nav(`/rates/versions/${r.id}`); }}>New version</button>}</td></tr>
               ))}
               {q.data?.length === 0 && <tr><td colSpan={5} className="empty">No rate schemes.</td></tr>}
