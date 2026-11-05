@@ -146,7 +146,7 @@ export interface BillContext {
   bill: { billNo: string; billDate: string; periodStart: string; periodEnd: string; revisionNo: number };
   client: { name: string; billing_address: string; gstin: string | null; pan: string | null; state_name: string | null; state_code: string | null; header_title?: string | null; header_subtitle?: string | null; gst_mode?: string | null; duty_fields?: string[] | null };
   supplier: { name: string; address: string; gstin: string | null; pan: string | null; state_name: string | null; state_code: string | null; phone: string | null; email: string | null; bank_details: string | null } | null;
-  contract: { title: string; reference_no: string; po_number: string | null; sac_code?: string | null; arithmetic?: string | null };
+  contract: { title: string; reference_no: string; po_number: string | null; sac_code?: string | null; arithmetic?: string | null; invoice_rounding?: string | null };
   duties: RenderDuty[];
   output: BillCalcOutput;
   /** LR exact arithmetic only: how tax is presented (add / show_separate / rcm_note). */
@@ -171,6 +171,8 @@ export interface RenderModel {
   summary: { label: string; value: string; strong?: boolean; column?: 'amount' | 'nonTaxable'; key?: string; taxRate?: string }[];
   /** True when the bill uses the LR exact arithmetic, so spreadsheet formulas reproduce its numbers. */
   exact: boolean;
+  /** How the invoice total is rounded (none, nearest_rupee, up_rupee, down_rupee), so the Excel total formula rounds the same way. */
+  invoiceRounding: string;
   presentation: 'add' | 'show_separate' | 'rcm_note';
   amountInWords: string | null;
   notes: string[];
@@ -557,6 +559,7 @@ export function buildRenderModel(ctx: BillContext, layoutRaw: unknown): RenderMo
     totalsInTable: layout.totalsInTable,
     brandLabel: layout.brandLabel,
     exact: ctx.contract.arithmetic === 'lr_exact',
+    invoiceRounding: ctx.contract.invoice_rounding ?? 'none',
     presentation: ctx.presentation ?? 'add',
     supplierBlock: layout.showSupplier && sup ? [sup.name, sup.address, sup.gstin ? `GSTIN: ${sup.gstin}` : '', sup.pan ? `PAN: ${sup.pan}` : '', sup.state_name ? `State: ${sup.state_name}${sup.state_code ? ` (${sup.state_code})` : ''}` : '', [sup.phone, sup.email].filter(Boolean).join(' · ')].filter(Boolean) : [],
     clientBlock: !layout.showClient ? [] : layout.clientBlockStyle === 'name_address_gstin'

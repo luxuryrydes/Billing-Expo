@@ -58,7 +58,7 @@ beforeAll(async () => {
   const tax = [];
   for (const [n, t] of [['CGST', 'CGST'], ['SGST', 'SGST']]) tax.push((await call('POST', `/contracts/${ctx.contract}/tax-rules`, { name: n, tax_type: t, rate: '2.5', effective_from: '2026-04-01', source_ref: 'Test clause' })).body);
   for (const t of tax) await call('POST', `/tax-rules/${t.id}/approve`, {}, 'approver');
-  await call('POST', '/templates', { client_id: ctx.client, contract_id: ctx.contract, name: 'Bill' });
+  await call('POST', '/templates', { client_id: ctx.client, contract_id: ctx.contract, name: 'Bill', preset: 'lr_standard' });
   const tpl = (await call('GET', `/templates?clientId=${ctx.client}`)).body[0];
   await call('POST', `/template-versions/${tpl.versions[0].id}/approve`, { previewReviewed: true }, 'approver');
 }, 90_000);
@@ -188,10 +188,36 @@ describe('an invoice without a rate card for every duty', () => {
     await wb.xlsx.load((await dl(gen.files.xlsx)) as unknown as ArrayBuffer);
     const texts: string[] = [];
     const nums: number[] = [];
-    wb.worksheets[0].eachRow((r) => r.eachCell((c) => { const v = c.value as { result?: unknown } | null; if (typeof c.value === 'number') nums.push(c.value); else if (v && typeof v === 'object' && typeof v.result === 'number') nums.push(v.result); else if (c.text) texts.push(c.text); }));
-    expect(texts.some((t) => /GST @ 18%/.test(t))).toBe(true);
+    wb.worksheets[0].eachRow((r) => r.eachCell((c) => { const v = c.value as { result?: unknown } | null; if (typeof c.value === 'number') nums.push(c.value); else if (v && typeof v === 'object' && typeof v.result === 'number') nums.push(v.result); else if (typeof c.value === 'string') texts.push(c.value); }));
+    expect(texts).toEqual(expect.arrayContaining(['GST 12%', 'GST 5%', 'GST 18%']));   // each rate card's own GST, once each
+    // The workbook carries live formulas even though this contract is not on LR exact arithmetic: amount lines, taxable total, tax and total.
+    const formulas: string[] = [];
+    wb.worksheets[0].eachRow((r) => r.eachCell((c) => { const v = c.value as { formula?: string } | null; if (v && typeof v === 'object' && v.formula) formulas.push(v.formula); }));
+    expect(formulas.filter((f) => /^ROUND\(E\d+\*F\d+,2\)$/.test(f)).length).toBeGreaterThanOrEqual(3);
+    // (this bill mixes three different tax treatments, so its totals are written as figures; a one-tax bill gets the formulas, see below)
     expect(nums).toContain(5060);   // the printed total
     expect(nums).toContain(1500);   // the amount entered by hand
+  }, 120_000);
+
+  it('a one-tax bill on the default arithmetic has live formulas for the amounts, the taxable total, the tax and the rounded total', async () => {
+    await call('POST', '/duties/bulk', { rows: [duty(ctx.Ciaz, 'LOCAL', 'DL1CAA0101', '2026-06-10'), duty(ctx.Ciaz, 'LOCAL', 'DL1CAA0102', '2026-06-11')] }, 'operator');
+    const l = (await call('GET', `/invoice-builder/duties?contractId=${ctx.contract}&periodStart=2026-06-01&periodEnd=2026-06-30`)).body;
+    const inv = (await call('POST', '/invoice-builder/generate', { contractId: ctx.contract, periodStart: '2026-06-01', periodEnd: '2026-06-30', dutyIds: l.duties.map((d: any) => d.id) })).body;
+    expect(inv.totals).toMatchObject({ taxableValue: '4000.00', taxTotal: '480.00', grandTotal: '4480.00' });
+    const bill = (await call('GET', `/bills/${inv.billId}`)).body;
+    for (const e of bill.exceptions.filter((x: any) => x.status === 'open')) await call('PATCH', `/billing-exceptions/${e.id}`, { status: 'waived', note: 'Checked (test)' });
+    await call('POST', `/bills/${inv.billId}/submit-review`, {}, 'operator');
+    await call('POST', `/bills/${inv.billId}/approve`, {}, 'approver');
+    const gen = (await call('POST', `/bills/${inv.billId}/generate`, {}, 'approver')).body;
+    const buf = (await app.inject({ method: 'GET', url: `/api/files/${gen.files.xlsx}/download`, headers: { authorization: `Bearer ${tokens.admin}` } })).rawPayload;
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ArrayBuffer);
+    const formulas: string[] = [];
+    wb.worksheets[0].eachRow((r) => r.eachCell((c) => { const v = c.value as { formula?: string } | null; if (v && typeof v === 'object' && v.formula) formulas.push(v.formula); }));
+    expect(formulas.filter((f) => /^ROUND\(E\d+\*F\d+,2\)$/.test(f))).toHaveLength(2);
+    expect(formulas.some((f) => /^SUM\(H\d+:H\d+\)$/.test(f))).toBe(true);
+    expect(formulas.filter((f) => /^ROUND\(H\d+\*12\/100,2\)$/.test(f))).toHaveLength(1);   // one GST row, not two
+    expect(formulas.some((f) => /^ROUND\(SUM\(.+\),0\)$/.test(f))).toBe(true);
   }, 120_000);
 
   it('a non-taxable card bills without GST, and nothing can be billed twice', async () => {
@@ -315,5 +341,22 @@ describe('applying a card never stops on a missing time or an old date', () => {
     expect(calc[rids[1]]).toMatchObject({ status: 'ok', rateCardChosen: true });
     expect(calc[rids[1]].lines.some((l: any) => l.label === 'Extra km')).toBe(false);   // card A has only a base charge; 90 km is within nothing extra here
     expect(calc[rids[1]].totals.subtotal).toBe('2000.00');
+  });
+});
+
+describe('the same tax is never charged twice', () => {
+  it('uses one rule per tax type when two rules of that type are both in force', async () => {
+    const { calculateBill } = await import('./engine/bill.js');
+    const { RateConfigSchema } = await import('./engine/types.js');
+    const cfg = RateConfigSchema.parse({ billingModel: 'daily_package', params: { includedKm: '80', includedHours: '8' }, components: [{ code: 'BASE', label: 'Base', quantityExpr: '1', rate: '1000', unit: 'duty', taxCategory: 'taxable' }] });
+    const v = { id: 'v', schemeId: 's', schemeName: 'X', versionNo: 1, status: 'approved', effectiveFrom: '2026-04-01', effectiveTo: null, vehicleCategoryIds: [], dutyTypeCodes: [], config: cfg };
+    const rule = (id: string, type: string, from: string) => ({ id, name: type, taxType: type, rate: '2.5', effectiveFrom: from, effectiveTo: '2026-11-04', status: 'approved', sourceRef: 'x' });
+    const out = calculateBill({
+      periodStart: '2026-10-01', periodEnd: '2026-10-31', schemes: [v], settings: { taxMode: 'exclusive', taxLevel: 'document', invoiceRounding: 'none' },
+      taxRules: [rule('1', 'CGST', '2026-04-01'), rule('2', 'SGST', '2026-04-01'), rule('3', 'CGST', '2026-10-29'), rule('4', 'SGST', '2026-10-29')],
+      duties: [{ id: 'd', dutyDate: '2026-10-10', vehicleRegNo: 'X', vehicleCategoryId: null, dutyTypeCode: 'LOCAL', startKm: '1000', endKm: '1050', startAt: '2026-10-10 08:00', endAt: '2026-10-10 14:00', toll: null, parking: null, otherCharges: null }],
+    });
+    expect(out.taxLines.map((t) => t.taxType)).toEqual(['CGST', 'SGST']);
+    expect(out.totals).toMatchObject({ taxTotal: '50.00', grandTotal: '1050.00' });
   });
 });

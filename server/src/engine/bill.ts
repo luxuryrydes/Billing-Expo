@@ -129,7 +129,12 @@ export function selectScheme(duty: DutyInput, schemes: SchemeVersion[]): { versi
 
 export function selectTaxRules(rules: TaxRuleInput[], periodStart: string, periodEnd: string): { rules: TaxRuleInput[]; warnings: CalcException[] } {
   const approved = rules.filter((r) => r.status === 'approved');
-  const active = approved.filter((r) => covers(r.effectiveFrom, r.effectiveTo, periodEnd));
+  // One rule per tax type: when two rules of the same type are both in force (a rule re-entered or re-imported with another start date),
+  // only the most recent one applies, so the same tax is never charged twice on a bill.
+  const inForce = approved.filter((r) => covers(r.effectiveFrom, r.effectiveTo, periodEnd));
+  const newest = new Map<string, TaxRuleInput>();
+  for (const r of inForce) { const k = r.taxType.toUpperCase(); const cur = newest.get(k); if (!cur || r.effectiveFrom >= cur.effectiveFrom) newest.set(k, r); }
+  const active = inForce.filter((r) => newest.get(r.taxType.toUpperCase()) === r);
   const warnings: CalcException[] = [];
   for (const r of approved) {
     const changesInside = (r.effectiveFrom > periodStart && r.effectiveFrom <= periodEnd) || (r.effectiveTo != null && r.effectiveTo >= periodStart && r.effectiveTo < periodEnd);

@@ -8,7 +8,7 @@ import { INR_FMT, renderLayoutXlsx } from './excel.js';
 import type { RenderModel } from './render.js';
 
 const LR_KEYS = ['sno', 'dutyDate', 'vehicleRegNo', 'description', 'unit', 'rate', 'nonTaxable', 'amount'];
-const LR_WIDTHS = [7, 12, 14, 44, 9, 12, 13, 14];
+const LR_WIDTHS = [7, 12, 14, 44, 9, 18, 13, 14];   // column F is wide enough for "Taxable Amount", "Toll Tax & Parking" and "Total Amount"
 const LR_BRAND = 'FFC00000';
 const LR_GREY = 'FFD9D9D9';
 const FONT = 'Arial';
@@ -83,8 +83,12 @@ export async function renderLrStandardXlsx(m: RenderModel): Promise<Buffer> {
     if (nt !== null) { r.getCell(7).value = nt; r.getCell(7).numFmt = INR_FMT; }
     if (am !== null) {
       // A live formula only where it reproduces the calculated amount exactly.
-      const live = m.exact && u !== null && rt !== null && Math.abs(u * rt - am) < 0.00005;
-      r.getCell(8).value = live ? ({ formula: `E${r.number}*F${r.number}`, result: am } as ExcelJS.CellFormulaValue) : am;
+      // Every amount is unit x rate as a live formula. LR exact bills keep the unrounded product; other bills round each line to the paisa, as the
+      // software did. A line whose figure the formula would not reproduce stays a plain number.
+      const exactLive = m.exact && u !== null && rt !== null && Math.abs(u * rt - am) < 0.00005;
+      const roundedLive = !m.exact && u !== null && rt !== null && Math.abs(Math.round(u * rt * 100) / 100 - am) < 0.005;
+      r.getCell(8).value = exactLive ? ({ formula: `E${r.number}*F${r.number}`, result: am } as ExcelJS.CellFormulaValue)
+        : roundedLive ? ({ formula: `ROUND(E${r.number}*F${r.number},2)`, result: am } as ExcelJS.CellFormulaValue) : am;
       r.getCell(8).numFmt = INR_FMT;
     }
     r.font = { size: 10, name: FONT, bold: heading };
@@ -98,6 +102,10 @@ export async function renderLrStandardXlsx(m: RenderModel): Promise<Buffer> {
   const rangeH = `H${firstData}:H${lastData}`;
   const rangeG = `G${firstData}:G${lastData}`;
 
+  const sumCol = (col: number) => { let t = 0; for (let n = firstData; n <= lastData; n++) { const v = ws.getRow(n).getCell(col).value; const x = typeof v === 'number' ? v : v && typeof v === 'object' && 'result' in v ? Number((v as { result: unknown }).result) : 0; if (Number.isFinite(x)) t += x; } return Math.round(t * 100) / 100; };
+  let taxableNum = 0;
+  let tollNum = 0;
+  const taxNums: number[] = [];
   let taxRow = 0;
   let tollRow = 0;
   let rcmRow = 0;
@@ -108,20 +116,25 @@ export async function renderLrStandardXlsx(m: RenderModel): Promise<Buffer> {
     r.getCell(6).value = s.label;
     const col = s.column === 'nonTaxable' ? 7 : 8;
     const shown = shownNumber(s.value);
-    const put = (formula: string | null, result: number | null) => {
+    // A formula is written only when it gives the calculated figure; otherwise the figure itself is written.
+    const put = (formula: string | null, result: number | null, expected: number | null = result) => {
       if (result === null && formula === null) return;
-      r.getCell(col).value = m.exact && formula ? ({ formula, result: result ?? 0 } as ExcelJS.CellFormulaValue) : result;
+      const ok = formula !== null && expected !== null && result !== null && Math.abs(expected - result) < 0.005;
+      r.getCell(col).value = ok ? ({ formula: formula!, result: result ?? 0 } as ExcelJS.CellFormulaValue) : result;
       r.getCell(col).numFmt = INR_FMT;
     };
+    const roundTotal = (v: number) => (m.exact || m.invoiceRounding === 'nearest_rupee' ? Math.round(v + 1e-9) : m.invoiceRounding === 'up_rupee' ? Math.ceil(v - 1e-9) : m.invoiceRounding === 'down_rupee' ? Math.floor(v + 1e-9) : Math.round(v * 100) / 100);
+    const roundFormula = (inner: string) => (m.exact || m.invoiceRounding === 'nearest_rupee' ? `ROUND(${inner},0)` : m.invoiceRounding === 'up_rupee' ? `ROUNDUP(${inner},0)` : m.invoiceRounding === 'down_rupee' ? `ROUNDDOWN(${inner},0)` : `ROUND(${inner},2)`);
     switch (s.key) {
-      case 'taxableValue': taxRow = r.number; put(`SUM(${rangeH})`, shown); break;
-      case 'tax': taxRows.push(r.number); put(`ROUND(H${taxRow}*${s.taxRate ?? 0}/100,2)`, shown); break;
-      case 'nonTaxableTotal': tollRow = r.number; put(`SUM(${rangeG})`, shown); break;
-      case 'rcmAmount': rcmRow = r.number; put(`SUM(${rangeH})+SUM(${rangeG})`, shown); break;
+      case 'taxableValue': taxRow = r.number; taxableNum = sumCol(8); put(`SUM(${rangeH})`, shown, taxableNum); break;
+      case 'tax': taxRows.push(r.number); { const tv = m.exact ? taxableNum * Number(s.taxRate ?? 0) / 100 : Math.round(taxableNum * Number(s.taxRate ?? 0)) / 100; taxNums.push(shown ?? 0); put(`ROUND(H${taxRow}*${s.taxRate ?? 0}/100,2)`, shown, Math.round(tv * 100) / 100); } break;
+      case 'nonTaxableTotal': tollRow = r.number; tollNum = sumCol(7); put(`SUM(${rangeG})`, shown, tollNum); break;
+      case 'rcmAmount': rcmRow = r.number; put(`SUM(${rangeH})+SUM(${rangeG})`, shown, sumCol(8) + sumCol(7)); break;
       case 'grandTotal': {
         // Tax is part of the total only when it is added; show_separate and reverse charge leave it out.
         const parts = m.presentation === 'add' ? [taxRow && `H${taxRow}`, ...taxRows.map((x) => `H${x}`), tollRow && `G${tollRow}`] : [taxRow && `H${taxRow}`, rcmRow && `H${rcmRow}`, tollRow && `G${tollRow}`];
-        put(`ROUND(SUM(${parts.filter(Boolean).join(',') || '0'}),0)`, Number(m.grandTotal));
+        const sumNum = taxableNum + (m.presentation === 'add' ? taxNums.reduce((x, y) => x + y, 0) : 0) + tollNum;
+        put(roundFormula(`SUM(${parts.filter(Boolean).join(',') || '0'})`), Number(m.grandTotal), roundTotal(sumNum));
         break;
       }
       default: put(null, shown);
@@ -136,7 +149,7 @@ export async function renderLrStandardXlsx(m: RenderModel): Promise<Buffer> {
     }
     box(r.number);
   }
-  if (m.exact) {
+  {
     ws.addRow([]);
     const note = ws.addRow(['', '', '', 'Amounts are live formulas — edit UNIT / RATE and the totals recalculate. The Calculation Kit sheet is for what-if checks.']);
     note.font = { italic: true, size: 9, name: FONT, color: { argb: 'FF666666' } };
