@@ -76,8 +76,8 @@ export function SlipOverview({ d, calc, dutyType, saveCell, reload, curId, onPic
 
   const toggle = (id: string, on: boolean) => setSel((s) => { const n = new Set(s); if (on) n.add(id); else n.delete(id); return n; });
   const setMany = (list: typeof rows, on: boolean) => setSel((s) => { const n = new Set(s); for (const x of list) { if (on) n.add(x.r.id); else n.delete(x.r.id); } return n; });
-  const apply = async (ids: string[], schemeId: string | null, quiet = false) => {
-    const r = await run(() => api.post<any>(`/scan/batches/${d.batch.id}/apply-rate-card`, { readingIds: ids, schemeId, dutyType }));
+  const apply = async (ids: string[], schemeId: string | null, quiet = false, ignoreDates = false) => {
+    const r = await run(() => api.post<any>(`/scan/batches/${d.batch.id}/apply-rate-card`, { readingIds: ids, schemeId, dutyType, ignoreDates }));
     if (!r) return;
     if (!quiet) setResult(r);
     toast(schemeId ? `Rate card applied to ${r.applied} slip(s)${r.skipped.length ? `; ${r.skipped.length} not applicable` : ''}` : 'Rate card cleared (automatic)');
@@ -149,6 +149,15 @@ export function SlipOverview({ d, calc, dutyType, saveCell, reload, curId, onPic
               {result.rateCard ? `${result.applied} slip(s) now use "${result.rateCard}", totalling ₹${inr(result.total)} before tax.` : `${result.applied} slip(s) back to the automatic rate.`}
               {result.skipped.length > 0 && <> <b>For information:</b> {result.skipped.length} slip(s) were left as they were because the card does not fit them. This does not stop you: pick another card, enter the amount by hand, or continue to the invoice.</>}
               {result.skipped.length > 0 && <ul className="small" style={{ margin: '4px 0 0 16px' }}>{result.skipped.slice(0, 30).map((x: any) => <li key={x.readingId}>Page {x.page}: {x.reason}</li>)}</ul>}
+              {result.notes?.length > 0 && <div className="small" style={{ marginTop: 6 }}><b>Also for information</b> (the card was applied):<ul style={{ margin: '2px 0 0 16px' }}>{result.notes.slice(0, 30).map((n: any, i: number) => <li key={i}>Page {n.page}: {n.message}</li>)}</ul></div>}
+              {result.skipped.some((x: any) => /outside the card's dates/.test(x.reason)) && (
+                <div className="row" style={{ marginTop: 6 }}>
+                  <button className="btn sm" onClick={() => {
+                    const ids = result.skipped.filter((x: any) => /outside the card's dates/.test(x.reason)).map((x: any) => x.readingId);
+                    if (confirm(`Use "${result.rateCard}" for the ${ids.length} slip(s) dated outside the card's dates? Its rates are applied as they are, this is recorded, and the bill shows a warning. If a date was misread, correct the date instead.`)) void apply(ids, cardId, false, true);
+                  }}>Apply anyway to the slips dated outside the card's dates</button>
+                </div>
+              )}
               {result.skipped.length > 0 && (
                 <div className="row" style={{ marginTop: 6 }}>
                   <button className="btn sm" onClick={() => setSel(new Set(result.skipped.map((x: any) => x.readingId)))}>Select these slips</button>

@@ -98,7 +98,11 @@ export function deriveDutyVariables(duty: DutyInput, cfg: RateConfig): DutyVars 
   const sm = toMinutes(duty.startAt);
   const em = toMinutes(duty.endAt);
   const timeVars = ['duration_minutes', 'duration_hours', 'billable_hours', 'extra_minutes', 'extra_hours', 'night_count', 'night_minutes', 'days_spanned'];
-  if (sm == null || em == null) {
+  if ((sm == null || em == null) && duty.timeOptional) {
+    // No reporting or release time on the slip: nothing time-based is charged (the bill says so in a warning).
+    scope.duration_minutes = new D(0); scope.duration_hours = new D(0); scope.billable_hours = new D(0);
+    scope.extra_minutes = new D(0); scope.extra_hours = new D(0); scope.night_count = new D(0); scope.night_minutes = new D(0); scope.days_spanned = new D(1);
+  } else if (sm == null || em == null) {
     for (const k of timeVars) missing[k] = 'Start or closing date-time is missing or invalid';
   } else if (em < sm) {
     for (const k of timeVars) missing[k] = 'Closing date-time is before starting date-time';

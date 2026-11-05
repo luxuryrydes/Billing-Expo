@@ -117,6 +117,10 @@ export interface DutyInput {
   schemeId?: string | null;
   /** An amount entered by hand for this duty. It is used instead of a rate card. */
   manualAmount?: string | null;
+  /** Scanned duties: a missing reporting or release time is not an error; extra hours and night charges are then left out, with a warning. */
+  timeOptional?: boolean;
+  /** Use the chosen rate card even though the duty date is outside its dates (the nearest version is used); shown as a warning. */
+  ignoreCardDates?: boolean;
 }
 
 export interface TraceInfo {

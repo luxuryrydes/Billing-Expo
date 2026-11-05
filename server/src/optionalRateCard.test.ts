@@ -287,3 +287,33 @@ describe('rules from the billing guide', () => {
     expect(await nextBillNo(db, row)).toBe('LR-2611-0001');
   });
 });
+
+describe('applying a card never stops on a missing time or an old date', () => {
+  it('applies the card when the release time is missing (extra hours left out, with a note) and can apply anyway to a slip dated before the card', async () => {
+    const b = '----len';
+    const part = (i: number) => Buffer.concat([Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="s${i}.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`), Buffer.from([0xff, 0xd8, 0xff, 0xd9, 0x50 + i]), Buffer.from('\r\n')]);
+    const up = await app.inject({ method: 'POST', url: '/api/scan/batches/upload', payload: Buffer.concat([part(1), part(2), Buffer.from(`--${b}--\r\n`)]), headers: { 'content-type': `multipart/form-data; boundary=${b}`, authorization: `Bearer ${tokens.admin}` } });
+    const batch = up.json().batch.id;
+    const pages = (await call('GET', `/scan/batches/${batch}`)).body.pages;
+    const rids: string[] = [];
+    const slips = [{ date: '12-06-2026', release: '' }, { date: '30-10-2024', release: '16:00' }];
+    for (let i = 0; i < 2; i++) {
+      await call('POST', `/scan/pages/${pages[i].id}/read`, {});
+      const rid = (await call('GET', `/scan/batches/${batch}`)).body.pages[i].reading.id;
+      rids.push(rid);
+      await call('PUT', `/scan/readings/${rid}`, { contractId: ctx.contract, edited: { department: 'Test Directorate', duty_date: slips[i].date, vehicle_no: `DL1CCC000${i}`, vehicle_category: 'Ciaz', opening_km: '1000', closing_km: '1090', reporting_time: '08:00', release_time: slips[i].release, toll: '', parking: '', other_expenses: '' } });
+    }
+    const r = (await call('POST', `/scan/batches/${batch}/apply-rate-card`, { readingIds: rids, schemeId: ctx.A.scheme })).body;
+    expect(r.applied).toBe(1);   // the one with no release time is applied
+    expect(r.notes[0].message).toMatch(/release time is missing.*extra hours/i);
+    expect(r.skipped).toHaveLength(1);   // the 2024 slip is outside the card's dates
+    expect(r.skipped[0].reason).toMatch(/outside the card's dates/);
+    const any = (await call('POST', `/scan/batches/${batch}/apply-rate-card`, { readingIds: [rids[1]], schemeId: ctx.A.scheme, ignoreDates: true })).body;
+    expect(any.applied).toBe(1);
+    const calc = (await call('GET', `/scan/batches/${batch}/calculations`)).body;
+    expect(calc[rids[0]]).toMatchObject({ status: 'ok', rateCardChosen: true });
+    expect(calc[rids[1]]).toMatchObject({ status: 'ok', rateCardChosen: true });
+    expect(calc[rids[1]].lines.some((l: any) => l.label === 'Extra km')).toBe(false);   // card A has only a base charge; 90 km is within nothing extra here
+    expect(calc[rids[1]].totals.subtotal).toBe('2000.00');
+  });
+});

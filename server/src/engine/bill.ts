@@ -85,10 +85,11 @@ export function explainMismatch(duty: DutyInput, versions: SchemeVersion[], cate
 /** Picks the single approved, effective scheme version for a duty, preferring the most specific match. */
 export function selectScheme(duty: DutyInput, schemes: SchemeVersion[]): { version?: SchemeVersion; error?: CalcException } {
   const pool = duty.schemeId ? schemes.filter((s) => s.schemeId === duty.schemeId) : schemes;
+  const skipDates = !!duty.schemeId && !!duty.ignoreCardDates;
   const candidates = pool.filter(
     (s) =>
       s.status === 'approved' &&
-      covers(s.effectiveFrom, s.effectiveTo, duty.dutyDate) &&
+      (skipDates || covers(s.effectiveFrom, s.effectiveTo, duty.dutyDate)) &&
       (s.vehicleCategoryIds.length === 0 || (duty.vehicleCategoryId != null && s.vehicleCategoryIds.includes(duty.vehicleCategoryId))) &&
       dutyTypeOk(s, duty),
   );
@@ -106,7 +107,13 @@ export function selectScheme(duty: DutyInput, schemes: SchemeVersion[]): { versi
   }
   const score = (s: SchemeVersion) => (s.vehicleCategoryIds.length ? 2 : 0) + (s.dutyTypeCodes.length ? 1 : 0);
   const best = Math.max(...candidates.map(score));
-  const top = candidates.filter((s) => score(s) === best);
+  let top = candidates.filter((s) => score(s) === best);
+  if (skipDates && top.length > 1) {
+    // Several versions and none in force on the date: the one that starts nearest to it.
+    const dist = (s: SchemeVersion) => Math.abs(Date.parse(s.effectiveFrom) - Date.parse(duty.dutyDate));
+    const inForce = top.filter((s) => covers(s.effectiveFrom, s.effectiveTo, duty.dutyDate));
+    top = inForce.length ? inForce : [[...top].sort((a, b) => dist(a) - dist(b))[0]];
+  }
   if (top.length > 1) {
     return {
       error: {
@@ -219,6 +226,8 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
     }
     try {
       const r = calculateDuty(duty, sel.version, exact);
+      if (duty.timeOptional && (!duty.startAt || !duty.endAt)) exceptions.push({ dutyId: duty.id, code: 'TIME_MISSING', severity: 'warning', message: 'The reporting or release time is missing, so extra hours and night charges were not included. Enter the times to include them.' });
+      if (duty.schemeId && duty.ignoreCardDates && !covers(sel.version.effectiveFrom, sel.version.effectiveTo, duty.dutyDate)) exceptions.push({ dutyId: duty.id, code: 'CARD_DATES_OVERRIDDEN', severity: 'warning', message: `${sel.version.schemeName} was used although the duty date ${duty.dutyDate} is outside its dates (${sel.version.effectiveFrom} to ${sel.version.effectiveTo ?? 'open'}), as chosen.` });
       for (const l of r.lines) l.versionId = sel.version.id;
       lines.push(...r.lines);
       dutyResults.push({ dutyId: duty.id, schemeVersionId: sel.version.id, variables: r.variables, total: lineTotal(r.lines).toFixed(2), ok: true });

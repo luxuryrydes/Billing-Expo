@@ -304,7 +304,7 @@ export async function scanRoutes(app: FastifyInstance) {
       const clientName = clientId ? lookups.clients.find((c) => c.id === clientId)?.name ?? hit?.clientName ?? null : null;
       const k = contractId ? contractInfo.get(contractId) : null;
       const preview: CalcPreview = built.input
-        ? await previewCalculation(db, built.input, r.rate_scheme_id ?? null, r.manual_amount ?? null)
+        ? await previewCalculation(db, built.input, r.rate_scheme_id ?? null, r.manual_amount ?? null, !!r.card_ignore_dates)
         : { status: 'review', message: built.problems.filter((p) => p.severity === 'error').map((p) => p.message).join(' ') || 'Some values are missing.', schemeVersionId: null, schemeName: null, versionNo: null, effectiveFrom: null, lines: [], taxLines: [], totals: null, variables: {} };
       out[r.id] = {
         ...preview,
@@ -345,7 +345,7 @@ export async function scanRoutes(app: FastifyInstance) {
   /** Applies one rate card to many slips. Each slip is checked first; a slip the card does not fit is left as it was and reported. */
   app.post('/scan/batches/:id/apply-rate-card', { preHandler: write }, async (req) => {
     const { id } = req.params as { id: string };
-    const b = parse(z.object({ readingIds: z.array(uuid).min(1).max(1000), schemeId: uuid.nullable(), dutyType: z.string().trim().max(40).default('LOCAL') }), req.body);
+    const b = parse(z.object({ readingIds: z.array(uuid).min(1).max(1000), schemeId: uuid.nullable(), dutyType: z.string().trim().max(40).default('LOCAL'), ignoreDates: z.boolean().default(false) }), req.body);
     const batch = await db.one<{ id: string; title: string }>('SELECT id, title FROM scan_batches WHERE id = $1', [id]);
     if (!batch) throw notFound('Scan batch');
     const scheme = b.schemeId ? await db.one<{ id: string; name: string; contract_id: string }>('SELECT id, name, contract_id FROM rate_schemes WHERE id = $1', [b.schemeId]) : null;
@@ -353,25 +353,29 @@ export async function scanRoutes(app: FastifyInstance) {
     const rows = await db.query<ReadingRow & { position: number }>(
       `SELECT r.*, p.position FROM slip_readings r JOIN scan_pages p ON p.id = r.page_id WHERE r.batch_id = $1 AND NOT p.deleted AND r.id = ANY($2::uuid[]) ORDER BY p.position`, [id, b.readingIds]);
     const lookups = await loadLookups(db);
-    const applied: { readingId: string; amount: string | null }[] = [];
+    const applied: { readingId: string; amount: string | null; note: string | null }[] = [];
     const skipped: { readingId: string; page: number; reason: string }[] = [];
     for (const r of rows) {
       const built = buildDuty(effectiveValues(r), { contractId: r.contract_id, lookups, batchTitle: batch.title, position: r.position, defaultDutyType: b.dutyType || 'LOCAL' });
       if (!built.input) { skipped.push({ readingId: r.id, page: r.position, reason: built.problems.filter((p) => p.severity === 'error').map((p) => p.message).join(' ') || 'The slip is incomplete.' }); continue; }
       let amount: string | null = null;
+      let previewNote: string | null = null;
       if (scheme) {
         if (built.input.contractId !== scheme.contract_id) { skipped.push({ readingId: r.id, page: r.position, reason: 'This rate card belongs to a different contract than the one this slip is on.' }); continue; }
-        const p = await previewCalculation(db, built.input, scheme.id);
+        const p = await previewCalculation(db, built.input, scheme.id, null, b.ignoreDates);
         if (p.status !== 'ok') { skipped.push({ readingId: r.id, page: r.position, reason: p.message ?? 'The rate card does not apply to this slip.' }); continue; }
         amount = p.totals?.subtotal ?? null;
+        previewNote = p.message;
       }
       // Choosing a card replaces an amount entered by hand for that slip; clearing the card leaves it alone.
-      await db.query('UPDATE slip_readings SET rate_scheme_id = $2, manual_amount = CASE WHEN $2::uuid IS NOT NULL THEN NULL ELSE manual_amount END, updated_at = now() WHERE id = $1', [r.id, scheme?.id ?? null]);
+      await db.query('UPDATE slip_readings SET rate_scheme_id = $2, manual_amount = CASE WHEN $2::uuid IS NOT NULL THEN NULL ELSE manual_amount END, card_ignore_dates = $3, updated_at = now() WHERE id = $1', [r.id, scheme?.id ?? null, !!scheme && b.ignoreDates]);
       await audit(db, req.user!.id, 'slip_reading', r.id, 'set_rate_card', { rate_scheme_id: r.rate_scheme_id ?? null }, { rate_scheme_id: scheme?.id ?? null }, scheme?.name);
-      applied.push({ readingId: r.id, amount });
+      applied.push({ readingId: r.id, amount, note: scheme ? previewNote : null });
     }
     const total = applied.reduce((a, x) => a + Math.round(Number(x.amount ?? 0) * 100), 0) / 100;
-    return { applied: applied.length, skipped, total: total.toFixed(2), rateCard: scheme?.name ?? null };
+    // Notes are information only (for example a missing release time): the card was applied.
+    const notes = rows.filter((r) => applied.find((a) => a.readingId === r.id)?.note).map((r) => ({ page: r.position, message: applied.find((a) => a.readingId === r.id)!.note! }));
+    return { applied: applied.length, skipped, notes, total: total.toFixed(2), rateCard: scheme?.name ?? null };
   });
 
   /** Enter (or clear) the amount by hand for many slips: no rate card is needed. */

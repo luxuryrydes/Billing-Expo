@@ -31,7 +31,7 @@ export interface CalcPreview {
 
 const empty = (message: string, extra: Partial<CalcPreview> = {}): CalcPreview => ({ status: 'review', message, schemeVersionId: null, schemeName: null, versionNo: null, effectiveFrom: null, variables: {}, lines: [], taxLines: [], totals: null, ...extra });
 
-export async function previewCalculation(db: Db, d: DutyInputT, schemeId: string | null = null, manualAmount: string | null = null): Promise<CalcPreview> {
+export async function previewCalculation(db: Db, d: DutyInputT, schemeId: string | null = null, manualAmount: string | null = null, ignoreDates = false): Promise<CalcPreview> {
   const k = await db.one<Record<string, string>>('SELECT tax_mode, tax_level, invoice_rounding, arithmetic, client_id FROM contracts WHERE id = $1', [d.contractId]);
   if (!k) return empty('The contract could not be found.');
   const manual = manualAmount != null && manualAmount !== '';
@@ -61,7 +61,7 @@ export async function previewCalculation(db: Db, d: DutyInputT, schemeId: string
         id: 'preview', dutyDate: d.dutyDate, vehicleRegNo: d.vehicleRegNo, vehicleCategoryId: d.vehicleCategoryId ?? null, vehicleCategoryName: category,
         schemeId, dutyTypeCode: d.dutyTypeCode ?? null, startKm: d.startKm ?? null, endKm: d.endKm ?? null, startAt: d.startAt ?? null, endAt: d.endAt ?? null,
         toll: d.toll ?? null, parking: d.parking ?? null, otherCharges: d.otherCharges ?? null, customFields: d.customFields ?? {},
-        manualAmount: manual ? manualAmount : null,
+        manualAmount: manual ? manualAmount : null, timeOptional: true, ignoreCardDates: ignoreDates,
       }],
     });
   } catch (e) {
