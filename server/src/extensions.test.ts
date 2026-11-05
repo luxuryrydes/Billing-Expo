@@ -218,3 +218,12 @@ describe('one approval per rate version', () => {
     expect(Object.fromEntries(rows.map((x) => [x.id, x.status]))).toMatchObject({ [copy.id]: 'retired', [ctx.version]: 'approved' });
   });
 });
+
+describe('stopping a scan', () => {
+  it('releases a batch that is stuck on "scanning" and keeps its status honest', async () => {
+    const b = await db.one<{ id: string }>(`INSERT INTO scan_batches(title, source, status) VALUES ('Stuck', 'scanner', 'scanning') RETURNING id`);
+    const r = (await call('POST', `/scan/batches/${b!.id}/cancel`, {})).body;
+    expect(r.batch).toMatchObject({ status: 'failed', error: 'Scanning was stopped.' });
+    expect((await call('POST', `/scan/batches/${b!.id}/cancel`, {}, 'operator', false)).status).toBe(200);   // stopping twice is harmless
+  });
+});

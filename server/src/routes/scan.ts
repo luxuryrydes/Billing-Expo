@@ -12,7 +12,7 @@ import { audit } from '../lib/audit.js';
 import { perm } from '../lib/auth.js';
 import { badRequest, conflict, notFound, parse, uuid } from '../lib/http.js';
 import { checkUpload, loadFile, saveFile } from '../lib/storage.js';
-import { listScanners, scan, scannerBusy, scannerStatus, ScannerError, type ScanOptions } from '../services/scanner.js';
+import { cancelScan, listScanners, scan, scannerBusy, scannerStatus, ScannerError, type ScanOptions } from '../services/scanner.js';
 import { readSlip, SLIP_FIELDS } from '../services/slipReader.js';
 import { buildDuty, effectiveValues, loadLookups, saveReadings, type ReadingRow } from '../services/slipDuty.js';
 import { previewCalculation, type CalcPreview } from '../services/slipCalc.js';
@@ -30,6 +30,10 @@ const ScanSettings = z.object({
 export async function scanRoutes(app: FastifyInstance) {
   const db = app.db;
   const write = perm('duty.write');
+
+  // A batch cannot still be scanning when the server has just started: it was cut off, so say so instead of waiting forever.
+  await db.query(`UPDATE scan_batches SET status = CASE WHEN EXISTS (SELECT 1 FROM scan_pages p WHERE p.batch_id = scan_batches.id) THEN 'ready' ELSE 'failed' END,
+                    error = 'Scanning was interrupted when the software restarted.' WHERE status = 'scanning'`);
 
   /** Adds one image to a batch and gives it an empty reading. */
   async function addPage(t: Db, batchId: string, name: string, buf: Buffer, userId: string) {
@@ -95,6 +99,18 @@ export async function scanRoutes(app: FastifyInstance) {
     };
   }
   app.get('/scan/batches/:id', { preHandler: perm('view') }, async (req) => batchDetail((req.params as { id: string }).id));
+
+  /** Stops a scan that is taking too long. Pages already received are kept. */
+  app.post('/scan/batches/:id/cancel', { preHandler: write }, async (req) => {
+    const { id } = req.params as { id: string };
+    const stopped = cancelScan();
+    if (!stopped) {
+      // Nothing is running (for example the scan was cut off): release the batch so it does not stay "scanning".
+      await db.query(`UPDATE scan_batches SET status = CASE WHEN EXISTS (SELECT 1 FROM scan_pages p WHERE p.batch_id = $1) THEN 'ready' ELSE 'failed' END, error = 'Scanning was stopped.' WHERE id = $1 AND status = 'scanning'`, [id]);
+    }
+    await audit(db, req.user!.id, 'scan_batch', id, 'cancel_scan', undefined, { running: stopped });
+    return batchDetail(id);
+  });
 
   /** Starts scanning in the background; the screen polls the batch for the pages as they arrive. */
   app.post('/scan/batches', { preHandler: write }, async (req) => {

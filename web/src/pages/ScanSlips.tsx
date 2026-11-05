@@ -207,7 +207,7 @@ function BatchHeader({ d, reload }: { d: any; reload: () => void }) {
         <span className="spacer" />
         <label className="btn sm">Add pages<input type="file" accept={IMAGE_ACCEPT} multiple style={{ display: 'none' }} onChange={(e) => { addFiles(e.target.files); e.target.value = ''; }} /></label>
       </div>
-      {b.status === 'scanning' && <div className="alert info" style={{ marginTop: 8 }}>Scanning… {d.pages.length} page(s) so far. Keep the pages in the scanner until it stops.</div>}
+      {b.status === 'scanning' && <div className="alert info row" style={{ marginTop: 8 }}><span>Scanning… {d.pages.length} page(s) so far. Keep the pages in the scanner until it stops.</span><span className="spacer" /><button className="btn danger" onClick={async () => { if (await run(() => api.post(`/scan/batches/${b.id}/cancel`, {}), 'Scanning stopped')) reload(); }}>Stop scanning</button></div>}
       {b.error && <div className="alert err" style={{ marginTop: 8 }}>{b.error}</div>}
     </div>
   );

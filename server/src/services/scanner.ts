@@ -4,7 +4,7 @@
  * NAPS2 is not installed it falls back to Windows Image Acquisition (WIA) with server/scripts/wia-scan.ps1.
  * SCANNER_DRIVER = auto (default) | naps2 | wia | mock (a stand-in for tests).
  */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -50,10 +50,23 @@ export function scannerStatus(): { driver: string; available: boolean; reason?: 
 let busy = false;
 export const scannerBusy = () => busy;
 
+/** The scanner program that is running right now, so a person can stop a scan that is taking too long. */
+let current: ChildProcess | null = null;
+let cancelRequested = false;
+/** Stops the running scan. Returns false when no scan is running. */
+export function cancelScan(): boolean {
+  if (!current || current.pid === undefined) return false;
+  cancelRequested = true;
+  // End the program and anything it started (the scanner driver), not only the first process.
+  spawn('taskkill', ['/pid', String(current.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).on('error', () => current?.kill());
+  return true;
+}
+
 /** Runs the helper and hands each JSON line it prints to `onLine`, in order. */
 function runScript(args: string[], onLine: (o: Record<string, any>) => Promise<void> | void, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const p = spawn(POWERSHELL, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT, ...args], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    current = p;
     let buf = '';
     let err = '';
     let failure: ScannerError | null = null;
@@ -76,6 +89,8 @@ function runScript(args: string[], onLine: (o: Record<string, any>) => Promise<v
     p.on('error', (e) => { clearTimeout(timer); reject(new ScannerError('start_failed', `Could not start the scanner helper: ${e.message}`)); });
     p.on('close', async () => {
       clearTimeout(timer);
+      if (current === p) current = null;
+      if (cancelRequested) { cancelRequested = false; return reject(new ScannerError('cancelled', 'Scanning was stopped.')); }
       if (buf.trim()) handle(buf.trim());
       await chain;
       // The helper stopped without saying it finished or why: show what Windows told it instead of a bare "no pages".
@@ -92,6 +107,7 @@ function runNaps2(args: string[], timeoutMs: number): Promise<string> {
     const exe = naps2Path();
     if (!exe) return reject(new ScannerError('unavailable', 'NAPS2 is not installed.'));
     const p = spawn(exe, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    current = p;
     let out = '';
     const timer = setTimeout(() => { p.kill(); reject(new ScannerError('timeout', 'The scanner did not finish in time.')); }, timeoutMs);
     p.stdout.on('data', (d) => (out += d));
@@ -99,6 +115,8 @@ function runNaps2(args: string[], timeoutMs: number): Promise<string> {
     p.on('error', (e) => { clearTimeout(timer); reject(new ScannerError('start_failed', `Could not start NAPS2: ${e.message}`)); });
     p.on('close', (code) => {
       clearTimeout(timer);
+      if (current === p) current = null;
+      if (cancelRequested) { cancelRequested = false; return reject(new ScannerError('cancelled', 'Scanning was stopped.')); }
       if (code === 0) return resolve(out);
       const msg = out.trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' ').slice(0, 300);
       reject(new ScannerError('naps2_failed', msg ? `The scanner reported: ${msg}` : `NAPS2 stopped with code ${code}.`));
@@ -131,6 +149,7 @@ export async function scan(o: ScanOptions, onPage: (file: string, index: number)
   if (!st.available) throw new ScannerError('unavailable', st.reason ?? 'Scanning is not available here.');
   if (busy) throw new ScannerError('busy', 'A scan is already running. Wait for it to finish.');
   busy = true;
+  cancelRequested = false;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lrbill-scan-'));
   try {
     let pages = 0;
