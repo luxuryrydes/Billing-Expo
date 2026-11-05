@@ -252,6 +252,20 @@ export async function rateRoutes(app: FastifyInstance) {
     return { approved: approved.length, skipped };
   });
 
+  /** Rejects many pending versions at once with one reason (for example the ones that overlap an approved version). Each rejection is recorded. */
+  app.post('/rate-versions/reject-all', { preHandler: perm('rate.approve') }, async (req) => {
+    const b = parse(z.object({ ids: z.array(z.string().uuid()).min(1).max(2000), note: z.string().trim().min(1, 'Give a reason').max(500) }), req.body);
+    let rejected = 0;
+    for (const id of b.ids) {
+      const row = await db.one(`UPDATE rate_scheme_versions SET status = 'rejected' WHERE id = $1 AND status = 'pending_approval' RETURNING id`, [id]);
+      if (!row) continue;
+      await db.query(`INSERT INTO approvals(entity_type, entity_id, action, user_id, note) VALUES ('rate_version',$1,'reject',$2,$3)`, [id, req.user!.id, b.note]);
+      await audit(db, req.user!.id, 'rate_version', id, 'reject', undefined, undefined, b.note);
+      rejected++;
+    }
+    return { rejected, skipped: b.ids.length - rejected };
+  });
+
   app.post('/rate-versions/:id/reject', { preHandler: perm('rate.approve') }, async (req) => {
     const { id } = req.params as { id: string };
     const { note } = parse(z.object({ note: z.string().min(1, 'Give a reason') }), req.body);

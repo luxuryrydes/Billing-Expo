@@ -55,5 +55,8 @@ describe('approve all rate versions', () => {
     const again = (await call('POST', '/rate-versions/approve-all', { ids })).body;
     expect(again.approved).toBe(0);
     expect(again.skipped.length).toBe(2);
+    // the one refused as an overlap can be rejected in one call with a reason; an approved one is left alone
+    const overlapped = r.skipped.map((x: any) => x.id);
+    expect((await call('POST', '/rate-versions/reject-all', { ids: [...overlapped, ...ids], note: 'Overlaps an approved version' })).body).toMatchObject({ rejected: overlapped.length });
   });
 });

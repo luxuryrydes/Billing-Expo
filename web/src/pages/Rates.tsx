@@ -87,6 +87,17 @@ export function RateSchemesPage() {
       {bulk && bulkResult && (
         <Modal title="Approval finished" onClose={() => { setBulk(false); setBulkResult(null); }}>
           <p><b>{bulkResult.approved}</b> approved{bulkResult.skipped.length > 0 && <>, <b>{bulkResult.skipped.length}</b> left pending</>}.</p>
+          {bulkResult.skipped.some((s) => /^Overlaps approved/.test(s.reason)) && can('rate.approve') && (
+            <div className="row" style={{ margin: '8px 0' }}>
+              <button className="btn danger" onClick={async () => {
+                const ids = bulkResult.skipped.filter((s) => /^Overlaps approved/.test(s.reason)).map((s) => s.id);
+                if (!confirm(`Reject all ${ids.length} versions that overlap an approved version? They stay in the history as Rejected.`)) return;
+                const r = await run(() => api.post('/rate-versions/reject-all', { ids, note: 'Overlaps an approved version of the same contract' }), 'Rejected');
+                if (r) { setBulk(false); setBulkResult(null); q.refetch(); }
+              }}>Reject all {bulkResult.skipped.filter((s) => /^Overlaps approved/.test(s.reason)).length} that overlap</button>
+              <span className="small muted">One click; each is recorded as rejected with the reason.</span>
+            </div>
+          )}
           {bulkResult.skipped.length > 0 && <ul className="small">{bulkResult.skipped.slice(0, 20).map((s) => <li key={s.id}><Link to={`/rates/versions/${s.id}`}>Open</Link> — {s.reason}</li>)}</ul>}
           <div className="row end"><button className="btn primary" onClick={() => { setBulk(false); setBulkResult(null); }}>Close</button></div>
         </Modal>
