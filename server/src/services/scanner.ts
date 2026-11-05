@@ -119,7 +119,10 @@ function runNaps2(args: string[], timeoutMs: number): Promise<string> {
       if (cancelRequested) { cancelRequested = false; return reject(new ScannerError('cancelled', 'Scanning was stopped.')); }
       if (code === 0) return resolve(out);
       const msg = out.trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' ').slice(0, 300);
-      reject(new ScannerError('naps2_failed', msg ? `The scanner reported: ${msg}` : `NAPS2 stopped with code ${code}.`));
+      const hint = /busy/i.test(msg) ? ' Another scan may still be finishing, or another program (HP Scan, Windows Scan) is using the scanner: close it, wait a few seconds and try again.'
+        : /bummer/i.test(msg) ? ' The TWAIN driver refused the request. Choose the entry ending in (WIA) instead.'
+        : /no pages are in the feeder/i.test(msg) ? ' Load the slips in the document feeder (the tray on top), then scan again.' : '';
+      reject(new ScannerError(/busy/i.test(msg) ? 'busy' : 'naps2_failed', msg ? `The scanner reported: ${msg}${hint}` : `NAPS2 stopped with code ${code}.`));
     });
   });
 }
@@ -169,7 +172,9 @@ export async function scan(o: ScanOptions, onPage: (file: string, index: number)
       const ext = o.mode === 'bw' ? 'png' : 'jpg';
       const source = o.source === 'flatbed' ? 'glass' : o.duplex ? 'duplex' : 'feeder';
       const args = ['-o', path.join(dir, `page-$(nnn).${ext}`), '--noprofile', '--driver', driver, '--device', device, '--source', source, '--pagesize', 'a4', '--dpi', String(o.dpi), '--bitdepth', o.mode === 'bw' ? 'bw' : o.mode === 'gray' ? 'gray' : 'color', '--jpegquality', '92', '--force'];
-      await runNaps2(args, 15 * 60_000);
+      // The scanner can stay busy for a moment after a previous or stopped scan: wait and try once more before giving up.
+      try { await runNaps2(args, 15 * 60_000); }
+      catch (e) { if (e instanceof ScannerError && e.code === 'busy') { await new Promise((r) => setTimeout(r, 5000)); await runNaps2(args, 15 * 60_000); } else throw e; }
       const files = fs.readdirSync(dir).filter((f) => /^page-\d+\.(jpg|png)$/.test(f)).sort();
       if (!files.length) throw new ScannerError('no_pages', 'The scanner finished but returned no pages. Check that the pages are in the feeder (or on the glass) and try again.');
       for (const f of files) { pages += 1; await onPage(path.join(dir, f), pages); }
