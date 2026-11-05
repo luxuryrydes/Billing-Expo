@@ -81,7 +81,7 @@ export function DashboardPage() {
   const steps = [
     { done: x.setup.supplier > 0, title: 'Add your company details', help: 'Name, address and GSTIN that print on bills.', to: '/settings', go: 'Open settings' },
     { done: x.setup.clients > 0, title: 'Add your departments', help: 'The departments and institutions you bill.', to: '/clients', go: 'Add departments' },
-    { done: x.setup.approved_rates > 0, title: 'Set up rates and approve them', help: 'What each vehicle and package costs.', to: '/rates', go: 'Open rates' },
+    { done: x.setup.approved_rates > 0, title: 'Set up your rates', help: 'What each vehicle and package costs.', to: '/rates', go: 'Open rates' },
     { done: x.setup.duties > 0, title: 'Record duties', help: 'Type them in, import a sheet, or scan the duty slips.', to: '/scan', go: 'Add duties' },
     { done: x.setup.bills > 0, title: 'Prepare your first bill', help: 'Pick a department and month, then review and approve.', to: '/billing', go: 'Prepare a bill' },
   ];

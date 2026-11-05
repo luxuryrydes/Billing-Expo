@@ -11,6 +11,8 @@ export const SETTINGS_DEFAULTS: Record<string, unknown> = {
   validation: DEFAULT_VALIDATION,
   /** When true, the person who prepared a bill / rate cannot approve it. */
   makerChecker: false,
+  /** False (the default): rates, tax rules and bill templates are used as soon as they are uploaded or saved. True: they wait for an approver. */
+  approvalsRequired: process.env.APPROVALS_REQUIRED === 'true',
   /** Next number per bill-number series prefix, to continue a series begun outside this system, e.g. { "LRTH/26-27/": 768 }. */
   billSeriesNext: {},
 };

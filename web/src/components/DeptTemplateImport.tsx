@@ -78,7 +78,7 @@ export function DeptTemplateImport({ onClose, onDone }: { onClose: () => void; o
       {result && (
         <>
           <ul>{result.map((x) => <li key={x.file}>{x.error ? <span style={{ color: 'var(--err)' }}>{x.file}: {x.error}</span> : x.skipped ? <>{x.file} — {x.skipped}</> : <>{x.file} → <b>{x.department}</b>{x.createdDepartment ? ' (new department)' : ''}: "{x.name}" created</>}</li>)}</ul>
-          <p className="small muted">Each new template is a draft: open it, preview it, and have an approver approve it before bills use it.</p>
+          <p className="small muted">Each new template is ready to use for bills. Open it in Billing Templates to preview it or adjust the layout.</p>
           <div className="row end"><button className="btn primary" onClick={onClose}>Close</button></div>
         </>
       )}

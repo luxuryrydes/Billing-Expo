@@ -173,7 +173,7 @@ export function ContractDetailPage() {
 }
 
 function TaxRules({ contractId, clientId, startDate, rules, reload }: { contractId: string; clientId: string; startDate: string; rules: any[]; reload: () => void }) {
-  const { can } = useAuth();
+  const { can, approvalsRequired } = useAuth();
   const { run, busy } = useAction();
   const [form, setForm] = useState<any>(null);
   const [retire, setRetire] = useState<any>(null);
@@ -183,7 +183,7 @@ function TaxRules({ contractId, clientId, startDate, rules, reload }: { contract
   };
   return (
     <>
-      <div className="alert warn">No tax rate is assumed. Enter each applicable tax with the clause or authority that establishes it; it only applies to bills after an approver approves it. To confirm an exemption, approve a 0% rule with its source.</div>
+      <div className="alert warn">No tax rate is assumed. Enter each applicable tax with the clause or authority that establishes it; {approvalsRequired ? 'it only applies to bills after an approver approves it.' : 'it applies to bills as soon as you save it.'} To confirm an exemption, approve a 0% rule with its source.</div>
       <div className="panel tight">
         <table className="t">
           <thead><tr><th>Name</th><th>Type</th><th className="num">Rate %</th><th>Effective</th><th>Source / authority</th><th>Status</th><th /></tr></thead>
@@ -194,7 +194,7 @@ function TaxRules({ contractId, clientId, startDate, rules, reload }: { contract
                 <td className="nowrap">
                   {r.status === 'draft' && can('tax.write') && <button className="btn sm" onClick={() => setForm(r)}>Edit</button>}{' '}
                   {r.status === 'draft' && can('tax.approve') && <button className="btn sm ok" disabled={busy} onClick={async () => { if (await run(() => api.post(`/tax-rules/${r.id}/approve`), 'Tax rule approved')) reload(); }}>Approve</button>}
-                  {r.status === 'approved' && can('tax.approve') && <button className="btn sm" onClick={() => setRetire(r)}>End / retire</button>}
+                  {r.status === 'approved' && can('tax.manage') && <button className="btn sm" onClick={() => setRetire(r)}>End / retire</button>}
                 </td></tr>
             ))}
             {rules.length === 0 && <tr><td colSpan={7} className="empty">No tax rules configured.</td></tr>}

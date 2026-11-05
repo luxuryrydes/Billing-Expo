@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { getSetting } from './master.js';
 import { audit } from '../lib/audit.js';
 import {
   createSession, destroySession, hashPassword, perm, requireUser, ROLE_PERMISSIONS, SESSION_COOKIE,
@@ -20,10 +21,18 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.get('/auth/status', async (req) => {
     const count = await db.one<{ n: number }>('SELECT count(*)::int AS n FROM app_users');
+    const approvals = await getSetting<boolean>(db, 'approvalsRequired');
+    const perms = req.user ? ROLE_PERMISSIONS[req.user.role] : [];
+    // The screens show approval buttons only when approvals are required. rate.manage / tax.manage cover ending a rate or tax rule and
+    // setting tax on rate cards, which people still do without any approval.
+    const shown: string[] = approvals ? [...perms] : perms.filter((p) => !['rate.approve', 'tax.approve', 'template.approve'].includes(p));
+    if (perms.includes('rate.approve') || perms.includes('rate.write')) shown.push('rate.manage');
+    if (perms.includes('tax.approve') || perms.includes('tax.write')) shown.push('tax.manage');
     return {
       needsSetup: (count?.n ?? 0) === 0,
       user: req.user ?? null,
-      permissions: req.user ? ROLE_PERMISSIONS[req.user.role] : [],
+      permissions: shown,
+      approvalsRequired: approvals,
     };
   });
 

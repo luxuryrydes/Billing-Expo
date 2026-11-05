@@ -59,9 +59,9 @@ export function RateSchemesPage() {
         <select value={clientId} onChange={(e) => { setClientId(e.target.value); setContractId(''); }}><option value="">All departments</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
         <select value={contractId} onChange={(e) => setContractId(e.target.value)}><option value="">All contracts</option>{contracts.data?.map((k) => <option key={k.id} value={k.id}>{k.reference_no}</option>)}</select>
         {can('rate.approve') && <ApproveExistingButton onDone={() => q.refetch()} />}
-        {can('rate.approve') && <TaxConfigButton schemes={q.data ?? []} onDone={() => q.refetch()} />}
+        {can('rate.manage') && <TaxConfigButton schemes={q.data ?? []} onDone={() => q.refetch()} />}
         {can('rate.approve') && pendingIds.length > 0 && <button className="btn" onClick={() => { setBulkResult(null); setBulk(true); }}>Approve all pending ({pendingIds.length})</button>}
-        {can('rate.approve') && <button className="btn" title="Retires draft versions that repeat the same rates as another version of the scheme. Nothing is deleted." onClick={async () => { const r = await run(() => api.post('/rate-versions/cleanup-duplicates', {})); if (r) { alert(`${r.retired} duplicate draft version(s) retired.`); q.refetch(); } }}>Clean up duplicate drafts</button>}
+        {can('rate.manage') && <button className="btn" title="Retires draft versions that repeat the same rates as another version of the scheme. Nothing is deleted." onClick={async () => { const r = await run(() => api.post('/rate-versions/cleanup-duplicates', {})); if (r) { alert(`${r.retired} duplicate draft version(s) retired.`); q.refetch(); } }}>Clean up duplicate drafts</button>}
         <label className="check"><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} />Show retired</label>
         {can('rate.write') && <button className="btn" onClick={() => (contractId ? setImportFor(contractId) : setPickContract(true))}>Import rate card</button>}
         {can('rate.write') && <button className="btn primary" onClick={() => { setF({ contract_id: contractId, name: '', description: '' }); setAdding(true); }}>New scheme</button>}
@@ -141,7 +141,7 @@ function ContractPicker({ value, onChange }: { value: string; onChange: (v: stri
 
 export function RateVersionPage() {
   const { id } = useParams();
-  const { can } = useAuth();
+  const { can, approvalsRequired } = useAuth();
   const q = useQuery({ queryKey: ['rate-version', id], queryFn: () => api.get(`/rate-versions/${id}`) });
   const vars = useQuery({ queryKey: ['rate-vars'], queryFn: () => api.get('/rates/variables') });
   const cats = useCategories();
@@ -168,10 +168,10 @@ export function RateVersionPage() {
   return (
     <>
       <PageHead title={`${v.scheme_name} — version ${v.version_no}`} sub={<><Link to={`/contracts/${v.contract_id}`}>{v.contract_title}</Link> · <Status s={q.data.status} /> {v.approved_by_name && <span className="small muted">approved by {v.approved_by_name}</span>}</>}>
-        {editable && <button className="btn primary" disabled={!dirty || busy} onClick={save}>Save draft</button>}
-        {editable && <button className="btn" disabled={dirty || busy} onClick={() => act('submit', {}, 'Submitted for approval')}>Submit for approval</button>}
+        {editable && <button className="btn primary" disabled={!dirty || busy} onClick={save}>{approvalsRequired ? 'Save draft' : 'Save'}</button>}
+        {editable && approvalsRequired && <button className="btn" disabled={dirty || busy} onClick={() => act('submit', {}, 'Submitted for approval')}>Submit for approval</button>}
         {q.data.status === 'pending_approval' && can('rate.approve') && <><button className="btn ok" disabled={busy} onClick={() => act('approve', {}, 'Approved')}>Approve</button><button className="btn danger" onClick={() => setReject(true)}>Reject</button></>}
-        {q.data.status === 'approved' && can('rate.approve') && <button className="btn" onClick={() => act('retire', {}, 'Retired')}>Retire</button>}
+        {q.data.status === 'approved' && can('rate.manage') && <button className="btn" onClick={() => act('retire', {}, 'Retired')}>Retire</button>}
         {can('rate.write') && <button className="btn" disabled={busy} onClick={async () => { const r = await run(() => api.post(`/rate-versions/${id}/clone`, {})); if (r) nav(`/rates/versions/${r.id}`); }}>Copy as new version</button>}
       </PageHead>
       {!editable && <div className="alert info">This version is {q.data.status.replace('_', ' ')} and read-only. Copy it as a new version to change rates; bills already calculated keep the version they used.</div>}
@@ -263,7 +263,7 @@ export function RateVersionPage() {
           {editable && <button className="btn sm" onClick={() => upd((c) => c.params.variables.push({ name: '', expr: '' }))}>Add variable</button>}
         </div>
       </fieldset>
-      <TaxPanel cfg={cfg} editable={editable} status={q.data.status} canApprove={can('rate.approve')} versionId={String(id)} upd={upd} reload={() => q.refetch()} />
+      <TaxPanel cfg={cfg} editable={editable} status={q.data.status} canApprove={can('rate.manage')} versionId={String(id)} upd={upd} reload={() => q.refetch()} />
       <TestCalculator config={cfg} />
       <details className="panel"><summary><b>Available variables</b></summary>
         <div className="grid g2" style={{ marginTop: 8 }}>

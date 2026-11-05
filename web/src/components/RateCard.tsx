@@ -26,7 +26,7 @@ const str = (v: unknown) => (v == null ? '' : String(v));
  * bills keep the rate they were made with. Removing a rate ends it, it never deletes history.
  */
 export function RateCardDialog({ clientId, clientName, onClose }: { clientId: string; clientName: string; onClose: () => void }) {
-  const { can } = useAuth();
+  const { can, approvalsRequired } = useAuth();
   const qc = useQueryClient();
   const [date, setDate] = useState(today());
   const q = useQuery({ queryKey: ['rate-card', clientId, date], queryFn: () => api.get(`/clients/${clientId}/rate-card${qs({ date })}`) });
@@ -97,7 +97,7 @@ export function RateCardDialog({ clientId, clientName, onClose }: { clientId: st
                       <td className="small" style={{ whiteSpace: 'nowrap' }}>{d(r.effectiveFrom)}{r.pending && <div><span className="badge warn">awaiting approval</span></div>}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         {can('rate.write') && <button className="btn sm" title="Edit" aria-label={`Edit ${e.vehicle} ${e.package}`} onClick={() => edit(r)}>✎</button>}{' '}
-                        {can('rate.approve') && <button className="btn sm danger" title="Stop this rate" aria-label={`Stop ${e.vehicle} ${e.package}`} onClick={() => setEnding(r)}>🗑</button>}
+                        {can('rate.manage') && <button className="btn sm danger" title="Stop this rate" aria-label={`Stop ${e.vehicle} ${e.package}`} onClick={() => setEnding(r)}>🗑</button>}
                       </td>
                     </tr>
                   );
@@ -147,10 +147,10 @@ export function RateCardDialog({ clientId, clientName, onClose }: { clientId: st
               </div>
               <div className="row end" style={{ marginTop: 10, gap: 10, flexWrap: 'wrap' }}>
                 <Field label="Applies to duties from" hint={schemeId ? 'Earlier duties keep the old rate' : undefined}><input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
-                {data.canApprove && <label className="row" style={{ gap: 6 }}><input type="checkbox" checked={approve} onChange={(e) => setApprove(e.target.checked)} /> Approve now</label>}
+                {approvalsRequired && data.canApprove && <label className="row" style={{ gap: 6 }}><input type="checkbox" checked={approve} onChange={(e) => setApprove(e.target.checked)} /> Approve now</label>}
                 <button className="btn primary" disabled={busy || !f.vehicle || !f.package || f.baseFare === ''} onClick={save}>{schemeId ? 'Save change' : '+ Add'}</button>
               </div>
-              {!data.canApprove && <p className="small muted">New and changed rates wait for an approver before they are used on bills.</p>}
+              {approvalsRequired && !data.canApprove && <p className="small muted">New and changed rates wait for an approver before they are used on bills.</p>}
             </div>
           )}
           <div className="row end" style={{ marginTop: 10 }}><button className="btn" onClick={onClose}>Close</button></div>
@@ -185,6 +185,7 @@ export function RegisterImportDialog({ onClose, onDone, preview }: { onClose: ()
   const fy = (() => { const t = today(); const y = Number(t.slice(0, 4)) - (Number(t.slice(5, 7)) < 4 ? 1 : 0); return `${y}-04-01`; })();
   // `preview` is an upload already analysed elsewhere (e.g. picked on Set up from documents).
   const [p, setP] = useState<any>(preview ?? null);
+  const { approvalsRequired } = useAuth();
   const [opts, setOpts] = useState<any>(() => ({ newRatesFrom: fy, changesFrom: today(), approve: false, hourRoundingMode: 'ceil', hourRoundingUnit: '30', ...(preview ? { ...preview.options, approve: preview.canApprove && preview.options.approve } : {}) }));
   const [tab, setTab] = useState<'changes' | 'departments' | 'rates' | 'errors'>('changes');
   const [skipInvalid, setSkipInvalid] = useState(false);
@@ -245,7 +246,7 @@ export function RegisterImportDialog({ onClose, onDone, preview }: { onClose: ()
             <Field label="Changed rates apply from" hint="Earlier duties keep the old rate"><input type="date" value={opts.changesFrom} onChange={(e) => recheck({ ...opts, changesFrom: e.target.value })} /></Field>
             <Field label="Extra hours rounding"><select value={`${opts.hourRoundingMode}:${opts.hourRoundingUnit}`} onChange={(e) => { const [m, u] = e.target.value.split(':'); recheck({ ...opts, hourRoundingMode: m, hourRoundingUnit: u }); }}>
               <option value="ceil:30">Up to the next 30 min</option><option value="ceil:60">Up to the next hour</option><option value="exact:1">Exact minutes</option><option value="nearest:30">Nearest 30 min</option></select></Field>
-            <div>{p.canApprove
+            <div>{!approvalsRequired ? null : p.canApprove
               ? <label className="row" style={{ gap: 6, marginTop: 22 }}><input type="checkbox" checked={opts.approve} onChange={(e) => setOpts({ ...opts, approve: e.target.checked })} /> Approve rates and tax now</label>
               : <p className="small muted">Rates and tax will wait for an approver.</p>}</div>
           </div>
@@ -317,7 +318,7 @@ export function RegisterImportDialog({ onClose, onDone, preview }: { onClose: ()
           <h3>Import complete</h3>
           <p>{done.departmentsAdded} departments added, {done.departmentsUpdated} updated · {done.ratesAdded} rates added, {done.ratesUpdated} changed{done.contractsCreated ? ` · ${done.contractsCreated} rate-card contracts created` : ''}. Everything else was left as it was.</p>
           {done.taxUpdated?.length > 0 && <div className="small">{done.taxUpdated.map((t: string) => <div key={t}>{t}</div>)}</div>}
-          {!opts.approve && <p className="small muted">The new rates are waiting for approval under Rate Schemes.</p>}
+          {approvalsRequired && !opts.approve && <p className="small muted">The new rates are waiting for approval under Rate Schemes.</p>}
           <div className="row end"><button className="btn primary" onClick={onClose}>Close</button></div>
         </div>
       )}

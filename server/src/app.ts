@@ -11,6 +11,8 @@ import { authRoutes } from './routes/auth.js';
 import { masterRoutes } from './routes/master.js';
 import { clientRoutes } from './routes/clients.js';
 import { extensionRoutes } from './routes/extensions.js';
+import { getSetting } from './routes/master.js';
+import { settleApprovals } from './services/autoApprove.js';
 import { documentRoutes } from './routes/documents.js';
 import { rateRoutes } from './routes/rates.js';
 import { dutyRoutes } from './routes/duties.js';
@@ -53,6 +55,21 @@ export async function buildApp(db: Db, opts: { logger?: boolean } = {}): Promise
   await app.register(
     async (api) => {
       api.get('/health', async () => ({ ok: true }));
+      // Approvals are not required (default): what was just uploaded or saved is used straight away. Runs before the answer is sent, so the
+      // screen that refreshes next already sees the result.
+      // Opening the pages that list these items also settles anything still waiting (for example items uploaded before approvals were switched off).
+      api.addHook('preHandler', async (req) => {
+        if (req.method !== 'GET' || !req.user || !/^\/api\/(rate-schemes|templates|contracts\/[0-9a-f-]{36})(\?|$)/.test(req.url)) return;
+        try { if (!(await getSetting<boolean>(api.db, 'approvalsRequired'))) await settleApprovals(api.db, req.user.id); } catch { /* shown as it is */ }
+      });
+      api.addHook('onSend', async (req, reply, payload) => {
+        if (!['POST', 'PUT', 'PATCH'].includes(req.method) || reply.statusCode >= 400 || !req.user) return payload;
+        if (!/^\/api\/(rate|tax|template|contracts|clients|onboarding|import|master|documents)/.test(req.url) || /\/(approve|reject|retire)\b/.test(req.url)) return payload;
+        try {
+          if (!(await getSetting<boolean>(api.db, 'approvalsRequired'))) await settleApprovals(api.db, req.user.id);
+        } catch { /* the request itself succeeded; the next one tries again */ }
+        return payload;
+      });
       await authRoutes(api);
       await masterRoutes(api);
       await clientRoutes(api);
