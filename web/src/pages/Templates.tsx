@@ -7,6 +7,7 @@ import { ErrorBox, Field, Loading, Modal, PageHead, Status, Tabs, useAction, use
 import { dt } from '../format';
 import { useClients, useContracts } from '../lookups';
 import { SampleFormatDialog } from './BillingExport';
+import { DeptTemplateImport } from '../components/DeptTemplateImport';
 
 export function TemplatesPage() {
   const { can } = useAuth();
@@ -16,11 +17,13 @@ export function TemplatesPage() {
   const q = useQuery({ queryKey: ['templates', clientId], queryFn: () => api.get<any[]>(`/templates${qs({ clientId })}`) });
   const [adding, setAdding] = useState(false);
   const [sampling, setSampling] = useState(false);
+  const [deptImport, setDeptImport] = useState(false);
   return (
     <>
       <PageHead title="Billing Templates" sub="Each department's bill layout — designed here or mapped onto its own Excel workbook. Versions are locked once approved.">
         <select value={clientId} onChange={(e) => setClientId(e.target.value)}><option value="">All departments</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
         {can('template.write') && <button className="btn" onClick={() => setSampling(true)}>Import sample bill / format</button>}
+        {can('template.write') && <button className="btn" onClick={() => setDeptImport(true)} title="Import the department bill workbooks (LR bill-sheet format) in one go">Import department templates</button>}
         {can('template.write') && <button className="btn primary" onClick={() => setAdding(true)}>New template</button>}
       </PageHead>
       <ErrorBox error={q.error} />
@@ -40,6 +43,7 @@ export function TemplatesPage() {
       </div>
       {adding && <NewTemplate onClose={() => setAdding(false)} />}
       {sampling && <SampleFormatDialog onClose={() => { setSampling(false); q.refetch(); }} />}
+      {deptImport && <DeptTemplateImport onClose={() => setDeptImport(false)} onDone={() => q.refetch()} />}
     </>
   );
 }

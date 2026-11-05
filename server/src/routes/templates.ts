@@ -15,6 +15,7 @@ import { renderBillXlsx } from '../services/excelLr.js';
 import { renderPdf } from '../services/pdf.js';
 import { getSetting } from './master.js';
 import { loadBillContext } from '../services/billing.js';
+import { loadClientKeys, matchDepartmentFor, parseDeptWorkbook, shortCodeFor } from '../services/deptTemplates.js';
 
 /** Synthetic, clearly-labelled data used only for template previews. */
 export function previewContext(): BillContext {
@@ -155,6 +156,83 @@ export async function templateRoutes(app: FastifyInstance) {
       return { templateId, versionId: v!.id, versionNo: v!.version_no };
     });
     return { ...out, notes: learned.notes, unmatched: learned.unmatched };
+  });
+
+  /**
+   * Department bill templates from Excel workbooks (the LR bill-sheet format). mode=preview reads each workbook and says which department it
+   * matches and what would change; mode=apply (with the department chosen for each file) fills in the department's header details, creates an
+   * LR Standard bill template for it, and keeps the workbook as its reference. The new templates still need the usual approval.
+   */
+  app.post('/templates/department-import', { preHandler: perm('template.write') }, async (req) => {
+    const files: { name: string; buf: Buffer }[] = [];
+    let fields: Record<string, string> = {};
+    for await (const part of (req as unknown as { parts(): AsyncIterable<{ type: string; filename?: string; fieldname: string; value?: unknown; toBuffer(): Promise<Buffer> }> }).parts()) {
+      if (part.type === 'file' && part.filename) {
+        const buf = await part.toBuffer();
+        checkUpload(part.filename, buf, ['.xlsx']);
+        files.push({ name: part.filename, buf });
+      } else if (part.type === 'field') fields[part.fieldname] = String(part.value ?? '');
+    }
+    if (!files.length) throw badRequest('Choose the department bill workbooks (.xlsx)');
+    const mode = fields.mode === 'apply' ? 'apply' : 'preview';
+    const choices = (fields.choices ? JSON.parse(fields.choices) : {}) as Record<string, { clientId?: string | 'new'; contractId?: string | null; updateDetails?: boolean }>;
+    const supplierNames = (await db.query<{ name: string }>('SELECT name FROM supplier_profiles')).map((x) => x.name);
+    const clients = await loadClientKeys(db);
+    const clientRows = await db.query<{ id: string; name: string; short_code: string; billing_address: string; gstin: string | null; header_title: string | null; header_subtitle: string | null }>('SELECT id, name, short_code, billing_address, gstin, header_title, header_subtitle FROM clients');
+    const byId = new Map(clientRows.map((c) => [c.id, c]));
+    const out: Record<string, unknown>[] = [];
+    for (const f of files) {
+      let sheet;
+      try { sheet = await parseDeptWorkbook(f.buf, f.name, supplierNames); } catch (e) { out.push({ file: f.name, error: (e as Error).message }); continue; }
+      const m = matchDepartmentFor(clients, sheet);
+      const ch = choices[f.name] ?? {};
+      const clientId = ch.clientId && ch.clientId !== 'new' ? ch.clientId : m.client?.id ?? null;
+      const cur = clientId ? byId.get(clientId) : null;
+      const contracts = clientId ? await db.query<{ id: string; reference_no: string }>(`SELECT id, reference_no FROM contracts WHERE client_id = $1 AND status = 'active' ORDER BY start_date DESC`, [clientId]) : [];
+      const changes = cur ? [
+        sheet.title && sheet.title !== cur.header_title ? { field: 'Header title', from: cur.header_title, to: sheet.title } : null,
+        sheet.subtitle && sheet.subtitle !== cur.header_subtitle ? { field: 'Header subtitle', from: cur.header_subtitle, to: sheet.subtitle } : null,
+        sheet.address && !cur.billing_address ? { field: 'Address', from: '', to: sheet.address } : null,
+        sheet.clientGstin && !cur.gstin ? { field: 'GSTIN', from: '', to: sheet.clientGstin } : null,
+      ].filter(Boolean) : [];
+      const view = { file: f.name, sheet, matched: cur ? { id: cur.id, name: cur.name } : null, candidates: (m.ambiguous ?? []).map((c) => ({ id: c.id, name: c.name })), contracts, changes, newShortCode: shortCodeFor(sheet) };
+      if (mode === 'preview') { out.push(view); continue; }
+
+      // ---- apply -------------------------------------------------------------------------------------------------
+      try {
+        const result = await db.tx(async (t) => {
+          let cid = clientId;
+          let created = false;
+          if (!cid && ch.clientId === 'new') {
+            if (!can(req.user, 'client.write')) throw forbidden('Creating a department needs the department-edit permission');
+            const code = shortCodeFor(sheet);
+            const name = sheet.clientLine || sheet.title || sheet.keyFromFile;
+            const ins = await t.one<{ id: string }>('INSERT INTO clients(name, short_code, billing_address, gstin, header_title, header_subtitle) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id', [name, code, sheet.address || '', sheet.clientGstin, sheet.title, sheet.subtitle]);
+            cid = ins!.id; created = true;
+            await audit(t, req.user!.id, 'client', cid, 'create', undefined, { from_template: f.name });
+          }
+          if (!cid) throw badRequest('Choose the department for this workbook');
+          const c = byId.get(cid) ?? (await t.one<typeof clientRows[number]>('SELECT id, name, short_code, billing_address, gstin, header_title, header_subtitle FROM clients WHERE id = $1', [cid]))!;
+          if (ch.updateDetails && !created) {
+            if (!can(req.user, 'client.write')) throw forbidden('Updating department details needs the department-edit permission');
+            await t.query('UPDATE clients SET header_title = COALESCE($2, header_title), header_subtitle = COALESCE($3, header_subtitle), billing_address = CASE WHEN billing_address = \'\' THEN $4 ELSE billing_address END, gstin = COALESCE(gstin, $5), updated_at = now() WHERE id = $1',
+              [cid, sheet.title, sheet.subtitle, sheet.address || '', sheet.clientGstin]);
+            await audit(t, req.user!.id, 'client', cid, 'import_template_details', undefined, { file: f.name, changes: view.changes });
+          }
+          const name = `${c.short_code} bill format (LR Standard)`;
+          if (await t.one('SELECT 1 FROM billing_templates WHERE client_id = $1 AND lower(name) = lower($2)', [cid, name])) return { file: f.name, department: c.name, skipped: `"${name}" already exists for this department.` };
+          const stored = await saveFile(t, f.name, f.buf, req.user!.id);
+          const rates = sheet.sample.slice(0, 8).map((x) => `${x.vehicle}: ${x.package || '—'} ${x.base ? `₹${x.base}` : ''}${x.extraKm ? `, extra km ₹${x.extraKm}` : ''}${x.extraHr ? `, extra hr ₹${x.extraHr}` : ''}`).join('; ');
+          const tpl = await t.one<{ id: string }>('INSERT INTO billing_templates(client_id, contract_id, name, description) VALUES ($1,$2,$3,$4) RETURNING id', [cid, ch.contractId ?? null, name, `LR bill sheet imported from ${f.name}`]);
+          const v = await t.one<{ id: string }>('INSERT INTO billing_template_versions(template_id, version_no, layout, reference_file_id, notes, created_by) VALUES ($1, 1, $2, $3, $4, $5) RETURNING id',
+            [tpl!.id, lrStandardLayout(), stored.id, `Imported from ${f.name}.${sheet.userNameLine ? ' The sheet prints a "User Name" line.' : ''}${rates ? ` Sample rows in the workbook (for reference only, not imported as rates): ${rates}.` : ''}`, req.user!.id]);
+          await audit(t, req.user!.id, 'template_version', v!.id, 'import_department_workbook', undefined, { file: f.name, template: tpl!.id });
+          return { file: f.name, department: c.name, createdDepartment: created, templateId: tpl!.id, versionId: v!.id, name };
+        });
+        out.push(result);
+      } catch (e) { out.push({ file: f.name, error: (e as Error).message }); }
+    }
+    return { mode, results: out };
   });
 
   app.get('/template-versions/:id', { preHandler: perm('view') }, async (req) => {
