@@ -175,6 +175,11 @@ describe('an invoice without a rate card for every duty', () => {
     for (const e of bill.exceptions.filter((x: any) => x.status === 'open')) await call('PATCH', `/billing-exceptions/${e.id}`, { status: 'waived', note: 'Checked (test)' });
     await call('POST', `/bills/${inv.billId}/submit-review`, {}, 'operator');
     await call('POST', `/bills/${inv.billId}/approve`, {}, 'approver');
+    // Sent / paid tracking: only an approved bill can be marked paid, the amounts are untouched, and it can be undone.
+    expect((await call('POST', `/bills/${inv.billId}/mark-paid`, { paid_on: '2026-11-20', reference: 'UTR123' }, 'approver')).body.paid_at).toBe('2026-11-20');
+    expect((await call('GET', `/bills/${inv.billId}`)).body).toMatchObject({ paid_at: '2026-11-20', payment_ref: 'UTR123', grand_total: '5060.00' });
+    await call('POST', `/bills/${inv.billId}/mark-unpaid`, {}, 'approver');
+    expect((await call('GET', `/bills/${inv.billId}`)).body.paid_at).toBeNull();
     const gen = (await call('POST', `/bills/${inv.billId}/generate`, {}, 'approver')).body;
     expect(gen.reconciliation.checks.filter((c: any) => !c.ok)).toEqual([]);
     const dl = async (id: string) => (await app.inject({ method: 'GET', url: `/api/files/${id}/download`, headers: { authorization: `Bearer ${tokens.admin}` } })).rawPayload;
@@ -258,5 +263,27 @@ describe('a contract with no tax rules', () => {
     expect(none.status).toBe('ok');   // not an error: the amount is shown and the note says no GST was added
     expect(none.totals).toMatchObject({ subtotal: '2400.00', tax: '0.00' });
     expect(none.message).toMatch(/No GST was added/);
+  });
+});
+
+describe('rules from the billing guide', () => {
+  it('bills at least the minimum kilometres per duty day, counting a long duty as several days', async () => {
+    const { calculateDuty } = await import('./engine/duty.js');
+    const { RateConfigSchema } = await import('./engine/types.js');
+    const cfg = RateConfigSchema.parse({ billingModel: 'daily_package', params: { includedKm: '60', includedHours: '8', minKmPerDay: '80' }, components: [{ code: 'EXKM', label: 'Extra km', quantityExpr: 'extra_km', rate: '10', unit: 'km', taxCategory: 'taxable' }] });
+    const v = { id: 'v', schemeId: 's', schemeName: 'X', versionNo: 1, status: 'approved', effectiveFrom: '2026-04-01', effectiveTo: null, vehicleCategoryIds: [], dutyTypeCodes: [], config: cfg };
+    const base = { id: 'd', dutyDate: '2026-05-10', vehicleRegNo: 'X', vehicleCategoryId: null, dutyTypeCode: 'LOCAL', startKm: '1000', toll: null, parking: null, otherCharges: null };
+    const one = calculateDuty({ ...base, endKm: '1050', startAt: '2026-05-10 08:00', endAt: '2026-05-10 16:00' }, v, false);
+    expect(one.variables.billable_km).toBe('80');   // 50 km driven, 80 km minimum
+    expect(one.variables.extra_km).toBe('20');
+    const two = calculateDuty({ ...base, endKm: '1100', startAt: '2026-05-10 08:00', endAt: '2026-05-11 14:00' }, v, false);
+    expect(two.variables.duty_days).toBe('2');
+    expect(two.variables.billable_km).toBe('160');   // 100 km driven, 2 days × 80 km minimum
+  });
+  it('numbers invoices like LR-2611-0007 with {YY}{MM} and a four-digit sequence', async () => {
+    const { nextBillNo } = await import('./services/billing.js');
+    await db.query(`UPDATE contracts SET bill_no_format = 'LR-{YY}{MM}-{SEQ:4}' WHERE id = $1`, [ctx.contract]);
+    const row = { id: 'x', client_id: ctx.client, contract_id: ctx.contract, period_start: '2026-11-01', period_end: '2026-11-30', bill_date: '2026-11-05' } as never;
+    expect(await nextBillNo(db, row)).toBe('LR-2611-0001');
   });
 });

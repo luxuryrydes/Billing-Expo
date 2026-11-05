@@ -28,6 +28,7 @@ export const DUTY_VARIABLES: Record<string, string> = {
   night_count: 'Number of night windows the duty overlaps',
   night_minutes: 'Minutes inside night windows',
   days_spanned: 'Calendar days touched by the duty',
+  duty_days: 'Duty days: the duration in whole days, rounded up, at least 1 (used for the minimum km per day)',
   weekday: 'Day of week of the duty date (0 = Sunday)',
   is_sunday: '1 if the duty date is a Sunday',
   toll: 'Toll amount on the duty',
@@ -123,6 +124,17 @@ export function deriveDutyVariables(duty: DutyInput, cfg: RateConfig): DutyVars 
       scope.night_minutes = new D(0);
     }
     scope.days_spanned = new D(Math.floor(em / 1440) - Math.floor(sm / 1440) + 1);
+  }
+
+  // Duty days and the minimum kilometres per day: billable km is at least minKmPerDay × duty days.
+  const durMin = scope.duration_minutes instanceof D ? scope.duration_minutes : null;
+  scope.duty_days = new D(durMin ? Math.max(1, Math.ceil(Number(durMin) / 1440)) : 1);
+  if (dec(p.minKmPerDay).gt(0) && scope.billable_km instanceof D) {
+    const floor = dec(p.minKmPerDay).mul(scope.duty_days);
+    if (floor.gt(scope.billable_km)) {
+      scope.billable_km = floor;
+      scope.extra_km = D.max(0, floor.sub(dec(p.includedKm)));
+    }
   }
 
   for (const [k, v] of Object.entries(duty.customFields ?? {})) {

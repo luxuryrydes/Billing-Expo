@@ -152,6 +152,18 @@ Stop the app, then run (PowerShell): `$env:ADMIN_EMAIL='you@example.com'; $env:A
 
 In **Read & review**, every slip shows its **Amount (₹)**, worked out by the same engine as bills from the **approved** rate version in force on the duty date for that department's contract, vehicle category and duty type (draft, rejected, expired or not-yet-effective versions are never used). Click the amount to see the approved rate, included km/hours, extra quantities, each charge with its formula, tax and the final amount. If no approved rate applies or a reading is missing, the slip says **Needs review** and no amount is shown. The amount follows every edit on screen. The Excel export carries the calculated amounts (read-only) and is recalculated after upload. When slips are saved as duties, the calculation, the rate version used and its number are stored with the duty (`duty_calculations`); approving a newer rate later does not change them, and re-saving the same batch updates the same duties.
 
+### Billing after scanning: the daily checklist (from the LR Taxi billing guide)
+
+The guide in `docs/reference-source/LR-Taxi-Billing-Guide.md` describes the older app. Here is how each step is done in Billing Expo:
+
+1. **One-time set-up:** supplier details (Settings), departments with their aliases (Departments & Institutions; GST mode `include` / `show_separate` / `rcm` per department), contracts, tax rules, and **Rate Schemes** per vehicle type (base fare, included km and hours, extra km / hour rates, **minimum km per day**, night window and charge, driver allowance, fixed price, Taxable / Non-taxable with a GST %).
+2. **Scan:** Duty Slip Scanning & Billing -> scan or add images -> the AI reads the slips -> check every value (amber = unsure) -> save as duties. Total km is closing minus opening and hours come from reporting and release time, as in the guide.
+3. **Check the month:** Duty Register (or the grouped review) for the department.
+4. **Invoice:** tab *4. Create invoice* -> choose the duties -> check the summary -> **Generate Department Invoice** -> review and approve in Billing Workspace -> **Generate Excel & PDF** (the PDF has the amount in words; Excel has live formulas).
+5. **Sent and paid:** **Mark submitted** when the bill goes to the department, **Mark paid** when the money arrives (it can be undone). A Paid badge shows in Billing Export / Invoices.
+
+How the guide's calculation maps: days = duty days (the duration rounded up to whole days, at least 1; the variable `duty_days`); effective km = the larger of the actual km and *minimum km per day* x days; extra km and extra hours beyond the included allowance; base fare; night and driver allowance as rate-card components; GST from the rate card's own setting first, then the contract's approved tax rules; parking and tolls are outside the GST base; amounts to the paisa (or the whole rupee for LR exact). Invoice numbers like `LR-2611-0007` use the bill number format `LR-{YY}{MM}-{SEQ:4}`.
+
 ### Rate cards: approval, tax and "optional"
 
 - **Approve the existing cards:** on Rate Schemes, **Approve all existing rate cards** retires duplicate drafts, then approves every card that is waiting for approval or still a draft and not ended, as the person who pressed it. Nothing about the rates, dates, vehicle categories or duty types changes; cards that cannot be approved (an overlap, a configuration problem, no duty type) are listed with the reason, and the overlapping ones can be rejected in one click. Each scheme shows **Approved / Pending / Inactive**, and each version shows its tax setting.

@@ -66,7 +66,7 @@ function InvoiceList() {
                   <tr key={b.id}><td><Link to={`/billing/${b.id}`}>{b.bill_no ?? 'Draft'}</Link>{b.revision_no > 0 && <span className="badge brand"> Rev {b.revision_no}</span>}</td><td>{b.client_name}</td><td>{b.contract_ref}</td>
                     <td className="nowrap">{b.period_type === 'date' ? <>{d(b.period_start)} <span className="badge">date-wise</span></> : <>{d(b.period_start)} – {d(b.period_end)}</>}</td>
                     <td className="num">{b.duty_count}</td><td className="num">{inr(b.taxable_value)}</td><td className="num">{inr(b.tax_total)}</td><td className="num"><b>{inr(b.grand_total)}</b></td>
-                    <td><Status s={b.status} />{b.open_exceptions > 0 && <span className="badge err"> {b.open_exceptions} open</span>}</td>
+                    <td><Status s={b.status} />{b.paid_at && <span className="badge ok" title={`Paid on ${b.paid_at}`}> Paid</span>}{b.open_exceptions > 0 && <span className="badge err"> {b.open_exceptions} open</span>}</td>
                     <td className="nowrap">{b.pdf_file_id ? <><a className="btn sm" href={fileUrl(b.pdf_file_id)}>PDF</a> <a className="btn sm" href={fileUrl(b.xlsx_file_id)}>Excel</a></> : <span className="small muted">after approval</span>}</td></tr>
                 ))}
                 {q.data?.length === 0 && <tr><td colSpan={10} className="empty">No bills yet.</td></tr>}

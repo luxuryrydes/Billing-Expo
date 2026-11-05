@@ -281,6 +281,25 @@ export async function billRoutes(app: FastifyInstance) {
     return { status: 'submitted' };
   });
 
+  /** Record that the money for a bill has arrived (or undo it if it was marked by mistake). The bill's amounts and status are not touched. */
+  app.post('/bills/:id/mark-paid', { preHandler: perm('bill.submit') }, async (req) => {
+    const { id } = req.params as { id: string };
+    const b = parse(z.object({ paid_on: isoDate.optional(), reference: z.string().trim().max(200).nullable().optional() }), req.body ?? {});
+    const bill = await getBill(db, id);
+    if (!['approved', 'generated', 'submitted'].includes(bill.status)) throw conflict('Only an approved bill can be marked paid.');
+    const on = b.paid_on ?? new Date().toISOString().slice(0, 10);
+    await db.query('UPDATE bills SET paid_at = $2, paid_by = $3, payment_ref = $4, updated_at = now() WHERE id = $1', [id, on, req.user!.id, b.reference ?? null]);
+    await audit(db, req.user!.id, 'bill', id, 'mark_paid', undefined, { paid_on: on, reference: b.reference ?? null });
+    return { paid_at: on };
+  });
+  app.post('/bills/:id/mark-unpaid', { preHandler: perm('bill.submit') }, async (req) => {
+    const { id } = req.params as { id: string };
+    await getBill(db, id);
+    await db.query('UPDATE bills SET paid_at = NULL, paid_by = NULL, payment_ref = NULL, updated_at = now() WHERE id = $1', [id]);
+    await audit(db, req.user!.id, 'bill', id, 'mark_unpaid');
+    return { paid_at: null };
+  });
+
   /** Controlled correction of an approved bill: a new revision; the original stays untouched until the revision is approved. */
   app.post('/bills/:id/revise', { preHandler: perm('bill.prepare') }, async (req) => {
     const { id } = req.params as { id: string };

@@ -221,7 +221,7 @@ export async function loadBillContext(db: Db, billId: string): Promise<BillConte
   };
 }
 
-/** Financial-year aware bill number: tokens {CLIENT} {YYYY} {MM} {FY} {SEQ}. */
+/** Financial-year aware bill number: tokens {CLIENT} {YYYY} {YY} {MM} {FY} {SEQ}; the guide's LR-2611-0007 is LR-{YY}{MM}-{SEQ:4}. */
 export async function nextBillNo(db: Db, bill: BillRow): Promise<string> {
   const k = await db.one<{ bill_no_format: string }>('SELECT bill_no_format FROM contracts WHERE id = $1', [bill.contract_id]);
   const c = await db.one<{ short_code: string }>('SELECT short_code FROM clients WHERE id = $1', [bill.client_id]);
@@ -233,7 +233,7 @@ export async function nextBillNo(db: Db, bill: BillRow): Promise<string> {
   const fys = `${String(fyStart % 100).padStart(2, '0')}-${String((fyStart + 1) % 100).padStart(2, '0')}`;
   const [py, pm, pd] = bill.period_start.split('-');
   const base = k!.bill_no_format.replace('{CLIENT}', c!.short_code).replace('{YYYY}', String(y)).replace('{MM}', String(m).padStart(2, '0'))
-    .replace('{DD}', String(d).padStart(2, '0')).replace('{PYYYY}', py).replace('{PMM}', pm).replace('{PDD}', pd).replace('{FYS}', fys).replace('{FY}', fy);
+    .replace('{YY}', String(y % 100).padStart(2, '0')).replace('{DD}', String(d).padStart(2, '0')).replace('{PYYYY}', py).replace('{PMM}', pm).replace('{PDD}', pd).replace('{FYS}', fys).replace('{FY}', fy);
   const seq = /\{SEQ(?::(\d+))?\}/.exec(base);
   if (!seq) return base;
   const width = Number(seq[1] ?? 3);

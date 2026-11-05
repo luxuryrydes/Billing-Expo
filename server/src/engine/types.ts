@@ -62,6 +62,8 @@ export const RateConfigSchema = z.object({
     /** Garage-to-garage or other contractual kilometre adjustment added to actual km. */
     kmAdjustment: decStr.default('0'),
     night: NightRuleSchema.default({ enabled: false, start: '22:00', end: '06:00', minOverlapMinutes: 1, countMode: 'per_night' }),
+    /** Minimum kilometres billed per duty day (0 = none): billable km is at least this × the number of duty days. */
+    minKmPerDay: decStr.default('0'),
     monthlyIncludedKm: decStr.default('0'),
     monthlyIncludedHours: decStr.default('0'),
     variables: z.array(VariableDefSchema).default([]),

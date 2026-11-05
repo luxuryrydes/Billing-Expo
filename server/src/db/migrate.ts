@@ -22,6 +22,7 @@ export const MIGRATIONS: [string, URL][] = [
   ['008_slip_calculation_and_extensions.sql', new URL('../../migrations/008_slip_calculation_and_extensions.sql', import.meta.url)],
   ['009_rate_card_choice.sql', new URL('../../migrations/009_rate_card_choice.sql', import.meta.url)],
   ['010_optional_rate_card.sql', new URL('../../migrations/010_optional_rate_card.sql', import.meta.url)],
+  ['011_bill_payment.sql', new URL('../../migrations/011_bill_payment.sql', import.meta.url)],
 ];
 
 export async function migrate(db: Db, log: (m: string) => void = () => {}): Promise<string[]> {
