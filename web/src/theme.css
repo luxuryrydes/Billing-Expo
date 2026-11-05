@@ -193,3 +193,12 @@ mark { background: color-mix(in srgb, #ffd54a 60%, transparent); color: inherit;
 :root[data-theme='dark'] [style*='232, 241, 252'], :root[data-theme='dark'] [style*='238, 242, 247'], :root[data-theme='dark'] [style*='255, 255, 255'] { color: #1b2236; }
 :root[data-theme='dark'] [style*='255, 243, 205'] input, :root[data-theme='dark'] [style*='230, 244, 234'] input { color: #1b2236; }
 :root[data-theme='dark'] .btn.sm[style*='255, 243, 205'] { color: #3b2f00; }
+
+/* sliding sidebar highlight (Framer Motion layout animation) */
+.side nav a { position: relative; }
+.side nav a.active { background: transparent; box-shadow: none; }
+.nav-pill { position: absolute; inset: 0; border-radius: 9px; background: linear-gradient(90deg, rgba(255, 255, 255, .24), rgba(255, 255, 255, .08)); box-shadow: inset 3px 0 0 #fff; z-index: 0; }
+.nav-in { position: relative; z-index: 1; display: flex; align-items: center; gap: 10px; }
+.dash-attn, .dash-card, .kpi { transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
+.dash-attn:hover, a.dash-card:hover { transform: translateY(-2px); }
+@media (prefers-reduced-motion: reduce) { .dash-attn:hover, a.dash-card:hover { transform: none; } }

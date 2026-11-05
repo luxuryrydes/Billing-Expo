@@ -111,6 +111,32 @@ export async function dutyRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  /**
+   * Deletes duty slips (duties) for good, for people with the delete permission. Only duties that were never on a bill can go: one that is on a
+   * bill, or was on one, keeps its place in that bill's history (delete or cancel the bill first). Each deletion is kept in the audit log with
+   * what the duty was and the reason. Scanned slips that made the duty go back to "not saved". Nothing else is touched.
+   */
+  app.post('/duties/delete-many', { preHandler: perm('duty.delete') }, async (req) => {
+    const b = parse(z.object({ ids: z.array(uuid).min(1).max(1000), reason: z.string().trim().min(3, 'Give a short reason').max(300) }), req.body);
+    const rows = await db.query<{ id: string; duty_date: string; vehicle_reg_no: string; start_km: string | null; end_km: string | null; contract_id: string; bill_no: string | null }>(
+      `SELECT d.id, d.duty_date, d.vehicle_reg_no, d.start_km, d.end_km, d.contract_id,
+              (SELECT COALESCE(bl.bill_no, 'a draft bill') FROM bill_duties bd JOIN bills bl ON bl.id = bd.bill_id WHERE bd.duty_id = d.id ORDER BY bd.active DESC LIMIT 1) AS bill_no
+       FROM duties d WHERE d.id = ANY($1::uuid[])`, [b.ids]);
+    let deleted = 0;
+    const skipped: { id: string; label: string; reason: string }[] = [];
+    for (const r of rows) {
+      const label = `${r.vehicle_reg_no} · ${r.duty_date}`;
+      if (r.bill_no) { skipped.push({ id: r.id, label, reason: `It is on ${r.bill_no}. Delete or cancel that bill first.` }); continue; }
+      await db.tx(async (t) => {
+        await t.query('UPDATE slip_readings SET duty_id = NULL, updated_at = now() WHERE duty_id = $1', [r.id]);
+        await audit(t, req.user!.id, 'duty', r.id, 'delete', { date: r.duty_date, vehicle: r.vehicle_reg_no, start_km: r.start_km, end_km: r.end_km, contract_id: r.contract_id }, undefined, b.reason);
+        await t.query('DELETE FROM duties WHERE id = $1', [r.id]);
+      });
+      deleted++;
+    }
+    return { deleted, skipped, missing: b.ids.length - rows.length };
+  });
+
   app.post('/duties/verify', { preHandler: perm('duty.verify') }, async (req) => {
     const { ids } = parse(z.object({ ids: z.array(uuid).min(1).max(2000) }), req.body);
     const rows = await db.query<{ id: string; error_count: number }>(

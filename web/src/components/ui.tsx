@@ -1,4 +1,6 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { spring } from './motion';
 import { errorText } from '../api';
 import { STATUS_LABEL } from '../format';
 
@@ -38,15 +40,15 @@ export function Field({ label, required, children, hint }: { label: string; requ
 
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   return (
-    <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-label={title}>
+    <motion.div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && onClose()} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.18 }}>
+      <motion.div className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-label={title} initial={{ opacity: 0, y: 24, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={spring}>
         <div className="modal-head">
           <h2 style={{ margin: 0 }}>{title}</h2>
           <button className="btn sm" onClick={onClose} aria-label="Close">✕</button>
         </div>
         {children}
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 }
 
@@ -86,7 +88,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastCtx.Provider value={push}>
       {children}
-      <div className="toast" role="status">{items.map((t) => <div key={t.id} className={t.err ? 'err' : ''}>{t.text}</div>)}</div>
+      <div className="toast" role="status"><AnimatePresence>{items.map((t) => <motion.div key={t.id} className={t.err ? 'err' : ''} initial={{ opacity: 0, x: 60, scale: 0.95 }} animate={{ opacity: 1, x: 0, scale: 1 }} exit={{ opacity: 0, x: 60 }} transition={spring} layout>{t.text}</motion.div>)}</AnimatePresence></div>
     </ToastCtx.Provider>
   );
 }

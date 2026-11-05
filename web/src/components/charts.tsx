@@ -5,7 +5,9 @@
  */
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { motion } from 'framer-motion';
 import { inr, inrShort } from '../format';
+import { GrowBar } from './motion';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -62,7 +64,7 @@ export function MonthlyColumns({ data }: { data: MonthPoint[] }) {
             return (
               <g key={d.month} tabIndex={0} role="img" aria-label={`${monthLong(d.month)}: ${inrShort(values[i])} from ${d.bills} bill${d.bills === 1 ? '' : 's'}`} onMouseEnter={() => setHover(i)} onFocus={() => setHover(i)} onBlur={() => setHover(null)} style={{ outline: 'none' }}>
                 <rect x={L + band * i} y={T} width={band} height={H - T - B} fill={hover === i ? 'rgba(42,120,214,.07)' : 'transparent'} />
-                {values[i] > 0 && <path d={`M${b.x},${H - B} V${b.yy + b.r} Q${b.x},${b.yy} ${b.x + b.r},${b.yy} H${b.x + barW - b.r} Q${b.x + barW},${b.yy} ${b.x + barW},${b.yy + b.r} V${H - B} Z`} fill={fill} />}
+                {values[i] > 0 && <motion.path initial={{ scaleY: 0 }} animate={{ scaleY: 1 }} transition={{ duration: 0.7, delay: i * 0.045, ease: [0.22, 1, 0.36, 1] }} style={{ transformBox: 'fill-box', transformOrigin: 'bottom' }} d={`M${b.x},${H - B} V${b.yy + b.r} Q${b.x},${b.yy} ${b.x + b.r},${b.yy} H${b.x + barW - b.r} Q${b.x + barW},${b.yy} ${b.x + barW},${b.yy + b.r} V${H - B} Z`} fill={fill} />}
                 {isNow && values[i] > 0 && <text x={b.x + barW / 2} y={b.yy - 6} textAnchor="middle" fontSize={12} fontWeight={600} fill="var(--d-ink)">{inrShort(values[i])}</text>}
                 <text x={L + band * i + band / 2} y={H - 10} textAnchor="middle" fontSize={11.5} fill={isNow ? 'var(--d-ink)' : 'var(--d-muted)'} fontWeight={isNow ? 600 : 400}>{monthShort(d.month)}</text>
               </g>
@@ -95,7 +97,7 @@ export function DepartmentBars({ rows, other }: { rows: DeptPoint[]; other: { co
       <div className="dash-bar-row" key={key}>
         <div className="dash-bar-name">{label}</div>
         <div className="dash-bar-area">
-          <div className="dash-bar-fill" style={{ width: `${Math.max(1.5, pct * 0.68)}%`, background: muted ? 'var(--d-bar)' : 'var(--d-accent)' }} />
+          <GrowBar className="dash-bar-fill" pct={Math.max(1.5, pct * 0.68)} style={{ background: muted ? 'var(--d-bar)' : 'var(--d-accent)' }} />
           <span className="dash-bar-value">{inrShort(value)} <span className="muted">· {sum > 0 ? Math.round((Number(value) / sum) * 100) : 0}%</span></span>
         </div>
       </div>
@@ -124,7 +126,7 @@ export function BillPipeline({ counts }: { counts: Record<string, number> }) {
   return (
     <div>
       <div className="dash-stagebar" role="img" aria-label={`${total} bills: ${STAGES.map((s) => `${counts[s.key] ?? 0} ${s.label.toLowerCase()}`).join(', ')}`}>
-        {STAGES.filter((s) => (counts[s.key] ?? 0) > 0).map((s) => <div key={s.key} title={`${s.label}: ${counts[s.key]}`} style={{ flex: counts[s.key], background: s.color }} />)}
+        {STAGES.filter((s) => (counts[s.key] ?? 0) > 0).map((s) => <motion.div key={s.key} title={`${s.label}: ${counts[s.key]}`} initial={{ scaleX: 0 }} animate={{ scaleX: 1 }} transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }} style={{ flex: counts[s.key], background: s.color, transformOrigin: 'left' }} />)}
       </div>
       <div className="dash-stages">
         {STAGES.map((s) => (

@@ -1,3 +1,4 @@
+import { CountUp, GrowBar, Rise, Stagger } from '../components/motion';
 import { useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
@@ -107,7 +108,7 @@ export function DashboardPage() {
             <div><h2>Getting started</h2><p className="dash-help">{doneCount} of {steps.length} steps done. Follow them in order and your first bill is ready.</p></div>
             <button className="btn sm" onClick={() => { setHideSetup(true); try { localStorage.setItem('dash-hide-setup', '1'); } catch { /* not saved */ } }}>Hide</button>
           </div>
-          <div className="dash-progress" role="progressbar" aria-valuenow={doneCount} aria-valuemin={0} aria-valuemax={steps.length} aria-label="Set-up progress"><div style={{ width: `${(doneCount / steps.length) * 100}%` }} /></div>
+          <div className="dash-progress" role="progressbar" aria-valuenow={doneCount} aria-valuemin={0} aria-valuemax={steps.length} aria-label="Set-up progress"><GrowBar pct={(doneCount / steps.length) * 100} style={{ height: '100%', background: 'var(--d-accent)', borderRadius: 6 }} /></div>
           <ol className="dash-steps">
             {steps.map((s, i) => (
               <li key={s.title} className={s.done ? 'done' : ''}>
@@ -125,9 +126,9 @@ export function DashboardPage() {
         {items.length === 0 ? (
           <div className="dash-card dash-clear">{I.check}<div><b>You are all caught up</b><div className="dash-help">No mistakes to fix and nothing is waiting for approval.</div></div></div>
         ) : (
-          <div className="dash-attn-grid">
+          <Stagger className="dash-attn-grid">
             {items.map((i) => (
-              <Link key={i.title} to={i.to} className={`dash-attn ${i.sev}`}>
+              <Rise key={i.title}><Link to={i.to} className={`dash-attn ${i.sev}`}>
                 <span className="dash-attn-icon">{i.icon}</span>
                 <div className="dash-attn-body">
                   <div className="dash-attn-top"><span className="dash-attn-n">{i.n}</span><span className="dash-attn-tag">{SEV_LABEL[i.sev]}</span></div>
@@ -135,9 +136,9 @@ export function DashboardPage() {
                   <div className="dash-help">{i.help}</div>
                 </div>
                 <span className="dash-attn-go">{i.go} →</span>
-              </Link>
+              </Link></Rise>
             ))}
-          </div>
+          </Stagger>
         )}
       </section>
 
@@ -146,23 +147,23 @@ export function DashboardPage() {
         <div className="dash-kpis">
           <div className="dash-card dash-hero-kpi">
             <div className="dash-kpi-label">Billed this month</div>
-            <div className="dash-hero-value">{mo.billed === '0' || mo.billed === '0.00' ? '₹0' : `₹${inr(mo.billed).replace(/\.00$/, '')}`}</div>
+            <div className="dash-hero-value"><CountUp value={Number(mo.billed)} format={(n) => (n < 0.5 ? '₹0' : `₹${inr(n.toFixed(2)).replace(/\.00$/, '')}`)} /></div>
             <Delta pct={mo.billedChangePct} vs="last month" />
             <div className="dash-help">Total of approved bills for {monthName}.</div>
           </div>
           <Link to="/bills" className="dash-card dash-kpi">
             <div className="dash-kpi-label">Bills approved</div>
-            <div className="dash-kpi-value">{mo.bills}</div>
+            <div className="dash-kpi-value"><CountUp value={Number(mo.bills)} /></div>
             <span className="dash-help">{mo.billsPrev} last month</span>
           </Link>
           <Link to="/duties" className="dash-card dash-kpi">
             <div className="dash-kpi-label">Duties recorded</div>
-            <div className="dash-kpi-value">{mo.duties}</div>
+            <div className="dash-kpi-value"><CountUp value={Number(mo.duties)} /></div>
             <Delta pct={mo.dutiesChangePct} vs="last month" />
           </Link>
           <Link to="/billing" className="dash-card dash-kpi">
             <div className="dash-kpi-label">Duties not billed yet</div>
-            <div className="dash-kpi-value">{mo.notBilled}</div>
+            <div className="dash-kpi-value"><CountUp value={Number(mo.notBilled)} /></div>
             <span className="dash-help">{mo.notBilled > 0 ? 'Waiting to be put on a bill' : 'Everything recorded is on a bill'}</span>
           </Link>
         </div>

@@ -193,3 +193,24 @@ describe('deleting an invoice', () => {
     expect(await counts()).toEqual(before);
   });
 });
+
+describe('deleting duty slips', () => {
+  it('deletes duties that were never billed, refuses billed ones with the reason, and needs the permission', async () => {
+    await call('POST', '/duties/bulk', { rows: [
+      { contractId: ctx.sail.contract, vehicleCategoryId: ctx.ciaz, dutyTypeCode: 'LOCAL', dutyDate: '2026-07-10', vehicleRegNo: 'DL1CDD0001', startKm: '1000', endKm: '1080', startAt: '2026-07-10 08:00', endAt: '2026-07-10 16:00' },
+      { contractId: ctx.sail.contract, vehicleCategoryId: ctx.ciaz, dutyTypeCode: 'LOCAL', dutyDate: '2026-07-11', vehicleRegNo: 'DL1CDD0002', startKm: '1000', endKm: '1080', startAt: '2026-07-11 08:00', endAt: '2026-07-11 16:00' },
+    ] });
+    const list = (await call('GET', `/invoice-builder/duties?contractId=${ctx.sail.contract}&periodStart=2026-07-01&periodEnd=2026-07-31`)).body.duties;
+    const ids = list.map((d: any) => d.id);
+    expect((await call('POST', '/duties/delete-many', { ids, reason: 'Entered twice' }, 'approver', false)).status).toBe(403);
+    // put one on a draft invoice: it can no longer be deleted
+    await call('POST', '/invoice-builder/generate', { contractId: ctx.sail.contract, periodStart: '2026-07-01', periodEnd: '2026-07-31', dutyIds: [ids[0]] });
+    const r = (await call('POST', '/duties/delete-many', { ids, reason: 'Entered twice' })).body;
+    expect(r.deleted).toBe(1);
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].reason).toMatch(/on .*bill/i);
+    expect(await db.one('SELECT 1 FROM duties WHERE id = $1', [ids[1]])).toBeNull();
+    expect(await db.one('SELECT 1 FROM duties WHERE id = $1', [ids[0]])).not.toBeNull();
+    expect((await call('POST', '/duties/delete-many', { ids: [ids[1]], reason: '' }, 'admin', false)).status).toBe(400);
+  });
+});

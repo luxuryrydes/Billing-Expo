@@ -11,7 +11,7 @@ export const PERMISSIONS = [
   'client.write', 'document.upload', 'extraction.review',
   'rate.write', 'rate.approve', 'tax.write', 'tax.approve',
   'template.write', 'template.approve',
-  'duty.write', 'duty.verify', 'duty.correct',
+  'duty.write', 'duty.verify', 'duty.correct', 'duty.delete',
   'bill.prepare', 'bill.review', 'bill.approve', 'bill.submit', 'bill.delete',
   'user.admin', 'settings.write',
 ] as const;

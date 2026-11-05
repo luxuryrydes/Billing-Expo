@@ -1,6 +1,8 @@
 import { StrictMode, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Navigate, NavLink, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom';
+import { MotionConfig, motion } from 'framer-motion';
+import { Page, spring } from './components/motion';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import './styles.css';
 import './theme.css';
@@ -77,6 +79,7 @@ const NAV: { to: string; label: string; perm?: string; group?: string }[] = [
 function Shell() {
   const { user, can, needsSetup, version } = useAuth();
   const client = useQueryClient();
+  const loc = useLocation();
   if (!user) return <LoginPage setup={needsSetup} />;
   const logout = async () => {
     await api.post('/auth/logout');
@@ -91,7 +94,7 @@ function Shell() {
           {NAV.filter((n) => !n.perm || can(n.perm)).map((n) => (
             <div key={n.to}>
               {n.group && <div className="group">{n.group}</div>}
-              <NavLink to={n.to} end={n.to === '/' || n.to === '/duties'}><NavIcon to={n.to} />{n.label}</NavLink>
+              <NavLink to={n.to} end={n.to === '/' || n.to === '/duties'}>{({ isActive }) => <>{isActive && <motion.span layoutId="nav-pill" className="nav-pill" transition={spring} />}<span className="nav-in"><NavIcon to={n.to} />{n.label}</span></>}</NavLink>
             </div>
           ))}
         </nav>
@@ -102,6 +105,7 @@ function Shell() {
         </div>
       </aside>
       <main className="main">
+        <Page key={loc.pathname}>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/onboarding" element={<OnboardingPage />} />
@@ -127,6 +131,7 @@ function Shell() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
+        </Page>
       </main>
     </div>
   );
@@ -134,7 +139,7 @@ function Shell() {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <QueryClientProvider client={qc}>
+    <MotionConfig reducedMotion="user"><QueryClientProvider client={qc}>
       <ToastProvider>
         <BrowserRouter>
           <AuthProvider>
@@ -142,6 +147,6 @@ createRoot(document.getElementById('root')!).render(
           </AuthProvider>
         </BrowserRouter>
       </ToastProvider>
-    </QueryClientProvider>
+    </QueryClientProvider></MotionConfig>
   </StrictMode>,
 );

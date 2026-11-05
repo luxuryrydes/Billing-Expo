@@ -22,12 +22,22 @@ export function DutyRegisterPage() {
   const q = useQuery({ queryKey: ['duties', filters], queryFn: () => api.get(`/duties${qs({ ...filters, pageSize: 200 })}`) });
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [detail, setDetail] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
   const { run, busy } = useAction();
   const rows: any[] = q.data?.rows ?? [];
   const pages = Math.ceil((q.data?.total ?? 0) / 200);
   const verify = async () => {
-    const r = await run(() => api.post('/duties/verify', { ids: [...sel] }));
+    const r = await run(() => api.post('/duties/verify', { ids: rows.filter((x) => sel.has(x.id) && x.status === 'entered').map((x) => x.id) }));
     if (r) { alert(`${r.verified} duty row(s) verified.${r.blockedByErrors ? ` ${r.blockedByErrors} could not be verified because they have errors.` : ''}`); setSel(new Set()); q.refetch(); }
+  };
+  const del = async (reason: string) => {
+    setAsking(false);
+    const r = await run(() => api.post<any>('/duties/delete-many', { ids: [...sel], reason }), 'Deleted');
+    if (r) {
+      setSel(new Set());
+      if (r.skipped.length) alert(`${r.deleted} deleted. ${r.skipped.length} could not be deleted:\n${r.skipped.slice(0, 8).map((x: any) => `${x.label}: ${x.reason}`).join('\n')}`);
+      q.refetch();
+    }
   };
   const exportXlsx = async () => {
     if (!filters.from || !filters.to) { alert('Choose a date range to export'); return; }
@@ -37,7 +47,8 @@ export function DutyRegisterPage() {
   return (
     <>
       <PageHead title="Duty Register" sub={`${q.data?.total ?? 0} duties`}>
-        {can('duty.verify') && <button className="btn" disabled={!sel.size || busy} onClick={verify}>Verify selected ({sel.size})</button>}
+        {can('duty.verify') && <button className="btn" disabled={!rows.some((x) => sel.has(x.id) && x.status === 'entered') || busy} onClick={verify}>Verify selected ({rows.filter((x) => sel.has(x.id) && x.status === 'entered').length})</button>}
+        {can('duty.delete') && <button className="btn danger" disabled={!sel.size || busy} onClick={() => setAsking(true)} title="Deletes the selected duty slips. Duties on a bill cannot be deleted.">Delete selected ({sel.size})</button>}
         {can('export') && <button className="btn" onClick={exportXlsx}>Export Excel</button>}
         <Link className="btn primary" to="/duties/entry">Enter duties</Link>
       </PageHead>
@@ -52,13 +63,14 @@ export function DutyRegisterPage() {
         <select value={filters.issues} onChange={(e) => set('issues', e.target.value)}><option value="">Any validation</option><option value="errors">With errors</option><option value="warnings">With warnings</option><option value="clean">Clean</option></select>
         {filters.createdToday && <span className="badge brand">Entered today <button className="btn link" onClick={() => set('createdToday', '')}>✕</button></span>}
       </div>
+      {asking && <Confirm text={`Delete ${sel.size} duty slip(s) for good? Duties that are on a bill are not deleted. Each deletion is kept in the audit log.`} needReason="Reason for deleting" yesLabel="Delete" danger onClose={() => setAsking(false)} onYes={del} />}
       <ErrorBox error={q.error} />
       <div className="panel tight">
         {q.isLoading ? <Loading /> : (
           <div className="scroll">
             <table className="t">
               <thead><tr>
-                <th><input type="checkbox" checked={rows.length > 0 && rows.every((r) => sel.has(r.id))} onChange={(e) => setSel(e.target.checked ? new Set(rows.filter((r) => r.status === 'entered').map((r) => r.id)) : new Set())} /></th>
+                <th><input type="checkbox" checked={rows.length > 0 && rows.every((r) => sel.has(r.id))} onChange={(e) => setSel(e.target.checked ? new Set(rows.filter((r) => !r.billId && r.status !== 'void' && (r.status === 'entered' || can('duty.delete'))).map((r) => r.id)) : new Set())} /></th>
                 <th>Date</th><th>Department</th><th>Vehicle</th><th>Type</th><th>Driver</th><th>Officer</th><th className="num">Start km</th><th className="num">Close km</th><th className="num">Km</th><th>Start</th><th>Close</th><th className="num">Toll+Park</th><th>Status</th><th>Issues</th><th>Bill</th>
               </tr></thead>
               <tbody>
@@ -67,7 +79,7 @@ export function DutyRegisterPage() {
                   const exp = r.toll || r.parking ? inr(String((Math.round(Number(r.toll ?? 0) * 100) + Math.round(Number(r.parking ?? 0) * 100)) / 100)) : '';
                   return (
                     <tr key={r.id} className="clickable" onClick={() => setDetail(r.id)}>
-                      <td onClick={(e) => e.stopPropagation()}><input type="checkbox" disabled={r.status !== 'entered'} checked={sel.has(r.id)} onChange={(e) => { const n = new Set(sel); if (e.target.checked) n.add(r.id); else n.delete(r.id); setSel(n); }} /></td>
+                      <td onClick={(e) => e.stopPropagation()}><input type="checkbox" disabled={!(r.status === 'entered' || (can('duty.delete') && !r.billId && r.status !== 'void'))} checked={sel.has(r.id)} onChange={(e) => { const n = new Set(sel); if (e.target.checked) n.add(r.id); else n.delete(r.id); setSel(n); }} /></td>
                       <td className="nowrap">{d(r.dutyDate)}</td><td>{r.clientName}<div className="small muted">{r.contractRef}</div></td><td className="mono">{r.vehicleRegNo}</td><td>{r.vehicleCategoryName}</td><td>{r.driverName}</td><td>{r.fieldOfficer}</td>
                       <td className="num">{r.startKm}</td><td className="num">{r.endKm}</td><td className="num">{km}</td><td className="nowrap small">{dt(r.startAt)}</td><td className="nowrap small">{dt(r.endAt)}</td><td className="num">{exp}</td>
                       <td><Status s={r.status} /></td>
