@@ -58,6 +58,30 @@ function covers(from: string, to: string | null, date: string): boolean {
   return from <= date && (to == null || date <= to);
 }
 
+/** A card covers a duty type when it lists it, or when it was set up for all duty types (cards from before this option count as all). */
+const dutyTypeOk = (s: SchemeVersion, duty: DutyInput) =>
+  s.dutyTypeCodes.length === 0 ? s.allDutyTypes !== false : duty.dutyTypeCode != null && s.dutyTypeCodes.includes(duty.dutyTypeCode);
+
+/** Why a rate card does not fit a duty, one plain sentence per problem. An empty list means it fits. */
+export function explainMismatch(duty: DutyInput, versions: SchemeVersion[], categoryNames: Record<string, string> = {}): string[] {
+  if (versions.length === 0) return ['This rate card has no version.'];
+  const live = versions.filter((v) => v.status === 'approved');
+  const newest = [...versions].sort((a, b) => b.versionNo - a.versionNo)[0];
+  if (live.length === 0) return [`The rate card is not approved yet (its latest version is ${newest.status.replace('_', ' ')}). Approve it in Rate Schemes.`];
+  const best = live.find((v) => covers(v.effectiveFrom, v.effectiveTo, duty.dutyDate)) ?? live[0];
+  const out: string[] = [];
+  if (!covers(best.effectiveFrom, best.effectiveTo, duty.dutyDate)) out.push(`The duty date ${duty.dutyDate} is outside the card's dates (${best.effectiveFrom} to ${best.effectiveTo ?? 'open'}).`);
+  if (best.vehicleCategoryIds.length && !(duty.vehicleCategoryId != null && best.vehicleCategoryIds.includes(duty.vehicleCategoryId))) {
+    out.push(`The card is for ${best.vehicleCategoryIds.map((id) => categoryNames[id] ?? 'another vehicle category').join(', ')}, but the slip's vehicle category is "${duty.vehicleCategoryName ?? 'not set'}".`);
+  }
+  if (!dutyTypeOk(best, duty)) {
+    out.push(best.dutyTypeCodes.length
+      ? `The card is for duty type ${best.dutyTypeCodes.join(', ')}, but this slip's duty type is "${duty.dutyTypeCode ?? 'not set'}".`
+      : 'The card has no duty type set (it is not marked for all duty types). Set it on the rate card.');
+  }
+  return out;
+}
+
 /** Picks the single approved, effective scheme version for a duty, preferring the most specific match. */
 export function selectScheme(duty: DutyInput, schemes: SchemeVersion[]): { version?: SchemeVersion; error?: CalcException } {
   const pool = duty.schemeId ? schemes.filter((s) => s.schemeId === duty.schemeId) : schemes;
@@ -66,7 +90,7 @@ export function selectScheme(duty: DutyInput, schemes: SchemeVersion[]): { versi
       s.status === 'approved' &&
       covers(s.effectiveFrom, s.effectiveTo, duty.dutyDate) &&
       (s.vehicleCategoryIds.length === 0 || (duty.vehicleCategoryId != null && s.vehicleCategoryIds.includes(duty.vehicleCategoryId))) &&
-      (s.dutyTypeCodes.length === 0 || (duty.dutyTypeCode != null && s.dutyTypeCodes.includes(duty.dutyTypeCode))),
+      dutyTypeOk(s, duty),
   );
   if (candidates.length === 0) {
     return {
@@ -75,7 +99,7 @@ export function selectScheme(duty: DutyInput, schemes: SchemeVersion[]): { versi
         code: 'NO_RATE',
         severity: 'error',
         message: duty.schemeId
-          ? `The rate card chosen for this duty (${schemes.find((s) => s.schemeId === duty.schemeId)?.schemeName ?? 'unknown'}) is not an approved rate effective on ${duty.dutyDate} for vehicle category "${duty.vehicleCategoryName ?? 'not set'}" and duty type "${duty.dutyTypeCode ?? 'not set'}".`
+          ? `The rate card "${schemes.find((s) => s.schemeId === duty.schemeId)?.schemeName ?? 'chosen'}" does not fit this slip. ${explainMismatch(duty, pool).join(' ') || 'No approved version applies.'}`
           : `No approved rate scheme is effective on ${duty.dutyDate} for vehicle category "${duty.vehicleCategoryName ?? 'not set'}" and duty type "${duty.dutyTypeCode ?? 'not set'}".`,
       },
     };
@@ -179,6 +203,14 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
       dutyResults.push({ dutyId: duty.id, schemeVersionId: null, variables: {}, total: '0.00', ok: false });
       continue;
     }
+    if (duty.manualAmount != null && duty.manualAmount !== '') {
+      // An amount entered by hand is used as it is; no rate card is needed or assumed.
+      const amt = dec(duty.manualAmount);
+      lines.push({ dutyId: duty.id, vehicleRegNo: duty.vehicleRegNo, scope: 'duty', componentCode: 'MANUAL', label: 'Duty charge', kind: 'charge', quantity: '1', unit: 'duty', rate: amt.toFixed(2), amount: amt.toFixed(2), taxCategory: 'taxable', versionId: null,
+        trace: { quantityExpr: '1', inputs: {}, formula: `Amount entered by hand: ${amt.toFixed(2)}`, schemeVersionId: '', schemeName: 'Amount entered by hand', versionNo: 0 } });
+      dutyResults.push({ dutyId: duty.id, schemeVersionId: null, variables: {}, total: amt.toFixed(2), ok: true });
+      continue;
+    }
     const sel = selectScheme(duty, input.schemes);
     if (!sel.version) {
       exceptions.push(sel.error!);
@@ -187,6 +219,7 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
     }
     try {
       const r = calculateDuty(duty, sel.version, exact);
+      for (const l of r.lines) l.versionId = sel.version.id;
       lines.push(...r.lines);
       dutyResults.push({ dutyId: duty.id, schemeVersionId: sel.version.id, variables: r.variables, total: lineTotal(r.lines).toFixed(2), ok: true });
       const g = byVersion.get(sel.version.id) ?? { version: sel.version, duties: [] };
@@ -230,7 +263,7 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
         for (const comp of periodComps) {
           try {
             const l = evalComponent(comp, cfg, scope, {}, { dutyId: null, vehicleRegNo: reg, version, exact });
-            if (l) lines.push(l);
+            if (l) { l.versionId = version.id; lines.push(l); }
           } catch (e) {
             exceptions.push({ dutyId: null, code: 'PERIOD_CALC_ERROR', severity: 'error', message: `${reg}: ${(e as Error).message}` });
           }
@@ -242,7 +275,7 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
       for (const comp of billComps) {
         try {
           const l = evalComponent(comp, cfg, scope, {}, { dutyId: null, vehicleRegNo: null, version, exact });
-          if (l) lines.push(l);
+          if (l) { l.versionId = version.id; lines.push(l); }
         } catch (e) {
           exceptions.push({ dutyId: null, code: 'BILL_CALC_ERROR', severity: 'error', message: (e as Error).message });
         }
@@ -253,7 +286,27 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
   // Taxes
   const { rules, warnings } = selectTaxRules(input.taxRules, input.periodStart, input.periodEnd);
   exceptions.push(...warnings);
-  const hasTaxable = lines.some((l) => l.taxCategory === 'taxable' && !dec(l.amount).isZero());
+  // Each line is taxed by its own rate card's tax setting: a card marked non-taxable carries no GST, a card with its own GST rate uses it
+  // (extra or included), and everything else (cards with no tax setting, as before) uses the contract's approved tax rules.
+  // Amounts entered by hand follow the invoice's choice (contract rules, none, or a rate typed on the invoice).
+  const versionTax = new Map(input.schemes.map((v) => [v.id, v.config.tax]));
+  const manualTax = input.settings.manualTax ?? { mode: 'contract' as const };
+  for (const l of lines) {
+    const t = l.versionId ? versionTax.get(l.versionId) : undefined;
+    if (t && t.taxable === false) l.taxCategory = 'non_taxable';
+    if (!l.versionId && l.componentCode === 'MANUAL' && manualTax.mode === 'non_taxable') l.taxCategory = 'non_taxable';
+  }
+  const profileOf = (l: CalcLine): string => {
+    if (l.taxCategory !== 'taxable') return 'none';
+    const t = l.versionId ? versionTax.get(l.versionId) : undefined;
+    if (t?.taxable && t.rate != null && t.rate !== '') return `own:${t.rate}:${t.mode}`;
+    if (!l.versionId && manualTax.mode === 'custom' && manualTax.rate) return `own:${manualTax.rate}:${manualTax.included ? 'included' : 'extra'}`;
+    return 'contract';
+  };
+  const contractLines = lines.filter((l) => profileOf(l) === 'contract');
+  const ownGroups = new Map<string, CalcLine[]>();
+  for (const l of lines) { const k = profileOf(l); if (k.startsWith('own:')) ownGroups.set(k, [...(ownGroups.get(k) ?? []), l]); }
+  const hasTaxable = contractLines.some((l) => !dec(l.amount).isZero());
   // Reverse charge: no tax is charged on the bill, so no tax rule is needed.
   if (hasTaxable && rules.length === 0 && presentation !== 'rcm_note') {
     exceptions.push({
@@ -263,8 +316,19 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
       message: 'Taxable charges exist but no approved tax rule is effective for this contract. Configure and approve the tax treatment (use a 0% rule to confirm an exemption).',
     });
   }
-  const { gross, base, taxLines: computedTaxLines, taxExact } = computeTaxes(lines, presentation === 'rcm_note' ? [] : rules, input.settings, exact);
-  const taxLines = computedTaxLines;
+  let gross: Dec = new D(0);
+  let base: Dec = new D(0);
+  let taxExact: Dec = new D(0);
+  const taxLines: TaxLine[] = [];
+  const addGroup = (ls: CalcLine[], rs: TaxRuleInput[], st: BillSettings) => {
+    const r = computeTaxes(ls, presentation === 'rcm_note' ? [] : rs, st, exact);
+    gross = gross.add(r.gross); base = base.add(r.base); taxExact = taxExact.add(r.taxExact); taxLines.push(...r.taxLines);
+  };
+  if (contractLines.length || ownGroups.size === 0) addGroup(contractLines, rules, input.settings);
+  for (const [key, ls] of ownGroups) {
+    const [, rate, mode] = key.split(':');
+    addGroup(ls, [{ id: '', name: `GST @ ${dec(rate).toString()}%`, taxType: 'GST', rate, effectiveFrom: input.periodStart, effectiveTo: null, status: 'approved', sourceRef: null }], { ...input.settings, taxMode: mode === 'included' ? 'inclusive' : 'exclusive' });
+  }
   const nonTaxable = lineTotal(lines, (l) => l.taxCategory === 'non_taxable');
   const taxTotal = exact ? taxExact : taxLines.reduce((a, t) => a.add(dec(t.amount)), new D(0));
   // show_separate: the tax is printed on the bill but is not part of the amount payable.

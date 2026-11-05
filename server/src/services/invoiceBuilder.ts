@@ -34,14 +34,15 @@ export interface InvoiceSummary {
   parking: string; toll: string; other: string; basicAmount: string; nonTaxable: string; gst: string; roundOff: string; finalAmount: string;
   problems: { dutyId: string | null; message: string }[];
 }
-export interface DutyPreview { dutyId: string; ok: boolean; amount: string | null; schemeId: string | null; schemeName: string | null; versionNo: number | null; message: string | null }
+export interface DutyPreview { dutyId: string; ok: boolean; amount: string | null; schemeId: string | null; schemeName: string | null; versionNo: number | null; message: string | null; manual: boolean; tax: string }
+export type ManualTax = { mode: 'contract' | 'non_taxable' | 'custom'; rate?: string; included?: boolean };
 
 const add = (a: number, b: string | number) => a + Math.round(Number(b) * 100);
 const money = (c: number) => (c / 100).toFixed(2);
 const sumVar = (vars: Record<string, string>[], k: string) => vars.reduce((a, v) => a + Number(v[k] ?? 0), 0);
 
 /** What these duties would come to as one invoice. Duties without an applicable approved rate are reported, not guessed. */
-export async function invoicePreview(db: Db, contractId: string, from: string, to: string, rows: DutyRow[]): Promise<{ summary: InvoiceSummary; perDuty: Map<string, DutyPreview> }> {
+export async function invoicePreview(db: Db, contractId: string, from: string, to: string, rows: DutyRow[], manualTax: ManualTax | null = null): Promise<{ summary: InvoiceSummary; perDuty: Map<string, DutyPreview> }> {
   const k = await db.one<Record<string, string>>('SELECT tax_mode, tax_level, invoice_rounding, arithmetic, client_id FROM contracts WHERE id = $1', [contractId]);
   const empty: InvoiceSummary = { duties: rows.length, totalKm: '0', extraKm: '0', extraKmAmount: '0.00', extraHours: '0', extraHoursAmount: '0.00', nights: '0', nightAmount: '0.00', parking: '0.00', toll: '0.00', other: '0.00', basicAmount: '0.00', nonTaxable: '0.00', gst: '0.00', roundOff: '0.00', finalAmount: '0.00', problems: [] };
   if (!k || rows.length === 0) return { summary: empty, perDuty: new Map() };
@@ -56,12 +57,17 @@ export async function invoicePreview(db: Db, contractId: string, from: string, t
     settings.arithmetic = 'lr_exact';
     settings.gstPresentation = gm === 'show_separate' ? 'show_separate' : gm === 'rcm' ? 'rcm_note' : 'add';
   }
+  if (manualTax) settings.manualTax = manualTax;
   const out = calculateBill({ periodStart: from, periodEnd: to, duties: rows.map(toRenderDuty), schemes, taxRules, settings });
   const perDuty = new Map<string, DutyPreview>();
   for (const r of out.duties) {
     const v = schemes.find((s) => s.id === r.schemeVersionId);
     const err = out.exceptions.find((e) => e.dutyId === r.dutyId && e.severity === 'error');
-    perDuty.set(r.dutyId, { dutyId: r.dutyId, ok: r.ok && !err, amount: r.ok && !err ? r.total : null, schemeId: v?.schemeId ?? null, schemeName: v?.schemeName ?? null, versionNo: v?.versionNo ?? null, message: err?.message ?? null });
+    const row = rows.find((x) => x.id === r.dutyId);
+    const isManual = row?.manual_amount != null;
+    const t = v?.config.tax;
+    const tax = isManual ? (manualTax?.mode === 'non_taxable' ? 'Non-taxable' : manualTax?.mode === 'custom' ? `GST ${manualTax.rate}% ${manualTax.included ? 'included' : 'extra'}` : 'Contract tax rules') : t ? (t.taxable ? (t.rate ? `GST ${t.rate}% ${t.mode === 'included' ? 'included' : 'extra'}` : 'Contract tax rules') : 'Non-taxable') : 'Contract tax rules';
+    perDuty.set(r.dutyId, { dutyId: r.dutyId, ok: r.ok && !err, amount: r.ok && !err ? r.total : null, schemeId: v?.schemeId ?? null, schemeName: isManual ? 'Amount entered by hand' : v?.schemeName ?? null, versionNo: v?.versionNo ?? null, message: err?.message ?? null, manual: isManual, tax });
   }
   const code = (c: string) => c.toUpperCase();
   let exKm = 0, exHr = 0, night = 0, park = 0, toll = 0, other = 0;

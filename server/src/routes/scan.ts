@@ -24,6 +24,7 @@ const IMAGE_EXT = ['.jpg', '.jpeg', '.png'];
 type SlipCalc = CalcPreview & {
   match: { clientId: string | null; clientName: string | null; contractId: string | null; contractRef: string | null; contractTitle: string | null; matched: boolean };
   rateSchemeId: string | null; rateCardName: string | null; rateCardChosen: boolean; vehicleCategoryId: string | null; dutyDate: string | null;
+  manualAmount: string | null;
 };
 const ScanSettings = z.object({
   deviceId: z.string().min(1),
@@ -251,13 +252,17 @@ export async function scanRoutes(app: FastifyInstance) {
 
   app.put('/scan/readings/:id', { preHandler: write }, async (req) => {
     const { id } = req.params as { id: string };
-    const b = parse(z.object({ edited: z.record(z.string(), z.string().nullable()).optional(), contractId: uuid.nullable().optional() }), req.body);
+    const b = parse(z.object({ edited: z.record(z.string(), z.string().nullable()).optional(), contractId: uuid.nullable().optional(), manualAmount: z.string().trim().regex(/^\d+(\.\d{1,2})?$/, 'Enter the amount as a number, for example 1800 or 1800.50').nullable().optional(), manualNote: z.string().trim().max(300).nullable().optional() }), req.body);
     const keys = new Set(SLIP_FIELDS.map((f) => f.key));
     const edited = Object.fromEntries(Object.entries(b.edited ?? {}).filter(([k]) => keys.has(k)).map(([k, v]) => [k, (v ?? '').trim()]));
     const r = await db.one('SELECT id FROM slip_readings WHERE id = $1', [id]);
     if (!r) throw notFound('Reading');
     if (Object.keys(edited).length) await db.query('UPDATE slip_readings SET edited = edited || $2::jsonb, updated_at = now() WHERE id = $1', [id, JSON.stringify(edited)]);
     if (b.contractId !== undefined) await db.query('UPDATE slip_readings SET contract_id = $2, updated_at = now() WHERE id = $1', [id, b.contractId]);
+    if (b.manualAmount !== undefined) {
+      await db.query('UPDATE slip_readings SET manual_amount = $2, manual_note = $3, updated_at = now() WHERE id = $1', [id, b.manualAmount, b.manualNote ?? null]);
+      await audit(db, req.user!.id, 'slip_reading', id, 'set_manual_amount', undefined, { amount: b.manualAmount }, b.manualNote ?? undefined);
+    }
     return { ok: true };
   });
 
@@ -289,7 +294,7 @@ export async function scanRoutes(app: FastifyInstance) {
     for (const r of rows) {
       if (r.status !== 'read') continue;
       const values = effectiveValues(r);
-      const built = buildDuty(values, { contractId: r.contract_id, lookups, batchTitle: batch.title, position: r.position, defaultDutyType: dutyType || null });
+      const built = buildDuty(values, { contractId: r.contract_id, lookups, batchTitle: batch.title, position: r.position, defaultDutyType: dutyType || 'LOCAL' });
       const dutyDate = built.input?.dutyDate ?? null;
       // Who the slip belongs to: the department record the name matches, never the AI's spelling.
       const hit = values.department ? matchDepartment(lookups, values.department, dutyDate) : null;
@@ -299,13 +304,14 @@ export async function scanRoutes(app: FastifyInstance) {
       const clientName = clientId ? lookups.clients.find((c) => c.id === clientId)?.name ?? hit?.clientName ?? null : null;
       const k = contractId ? contractInfo.get(contractId) : null;
       const preview: CalcPreview = built.input
-        ? await previewCalculation(db, built.input, r.rate_scheme_id ?? null)
+        ? await previewCalculation(db, built.input, r.rate_scheme_id ?? null, r.manual_amount ?? null)
         : { status: 'review', message: built.problems.filter((p) => p.severity === 'error').map((p) => p.message).join(' ') || 'Some values are missing.', schemeVersionId: null, schemeName: null, versionNo: null, effectiveFrom: null, lines: [], taxLines: [], totals: null, variables: {} };
       out[r.id] = {
         ...preview,
         match: { clientId, clientName, contractId, contractRef: k?.reference_no ?? null, contractTitle: k?.title ?? null, matched: !!clientId },
         rateSchemeId: r.rate_scheme_id ?? null,
-        rateCardName: r.rate_scheme_id ? schemeName.get(r.rate_scheme_id) ?? null : preview.schemeName,
+        manualAmount: r.manual_amount ?? null,
+        rateCardName: r.manual_amount != null ? 'Amount entered by hand' : r.rate_scheme_id ? schemeName.get(r.rate_scheme_id) ?? null : preview.schemeName,
         rateCardChosen: !!r.rate_scheme_id,
         vehicleCategoryId: built.input?.vehicleCategoryId ?? null,
         dutyDate,
@@ -350,7 +356,7 @@ export async function scanRoutes(app: FastifyInstance) {
     const applied: { readingId: string; amount: string | null }[] = [];
     const skipped: { readingId: string; page: number; reason: string }[] = [];
     for (const r of rows) {
-      const built = buildDuty(effectiveValues(r), { contractId: r.contract_id, lookups, batchTitle: batch.title, position: r.position, defaultDutyType: b.dutyType || null });
+      const built = buildDuty(effectiveValues(r), { contractId: r.contract_id, lookups, batchTitle: batch.title, position: r.position, defaultDutyType: b.dutyType || 'LOCAL' });
       if (!built.input) { skipped.push({ readingId: r.id, page: r.position, reason: built.problems.filter((p) => p.severity === 'error').map((p) => p.message).join(' ') || 'The slip is incomplete.' }); continue; }
       let amount: string | null = null;
       if (scheme) {
@@ -359,12 +365,26 @@ export async function scanRoutes(app: FastifyInstance) {
         if (p.status !== 'ok') { skipped.push({ readingId: r.id, page: r.position, reason: p.message ?? 'The rate card does not apply to this slip.' }); continue; }
         amount = p.totals?.subtotal ?? null;
       }
-      await db.query('UPDATE slip_readings SET rate_scheme_id = $2, updated_at = now() WHERE id = $1', [r.id, scheme?.id ?? null]);
+      // Choosing a card replaces an amount entered by hand for that slip; clearing the card leaves it alone.
+      await db.query('UPDATE slip_readings SET rate_scheme_id = $2, manual_amount = CASE WHEN $2::uuid IS NOT NULL THEN NULL ELSE manual_amount END, updated_at = now() WHERE id = $1', [r.id, scheme?.id ?? null]);
       await audit(db, req.user!.id, 'slip_reading', r.id, 'set_rate_card', { rate_scheme_id: r.rate_scheme_id ?? null }, { rate_scheme_id: scheme?.id ?? null }, scheme?.name);
       applied.push({ readingId: r.id, amount });
     }
     const total = applied.reduce((a, x) => a + Math.round(Number(x.amount ?? 0) * 100), 0) / 100;
     return { applied: applied.length, skipped, total: total.toFixed(2), rateCard: scheme?.name ?? null };
+  });
+
+  /** Enter (or clear) the amount by hand for many slips: no rate card is needed. */
+  app.post('/scan/batches/:id/apply-manual', { preHandler: write }, async (req) => {
+    const { id } = req.params as { id: string };
+    const b = parse(z.object({ readingIds: z.array(uuid).min(1).max(1000), amount: z.string().trim().regex(/^\d+(\.\d{1,2})?$/, 'Enter the amount as a number, for example 1800 or 1800.50').nullable(), note: z.string().trim().max(300).nullable().optional() }), req.body);
+    if (!(await db.one('SELECT 1 FROM scan_batches WHERE id = $1', [id]))) throw notFound('Scan batch');
+    const rows = await db.query<{ id: string }>('SELECT r.id FROM slip_readings r WHERE r.batch_id = $1 AND r.id = ANY($2::uuid[])', [id, b.readingIds]);
+    for (const r of rows) {
+      await db.query('UPDATE slip_readings SET manual_amount = $2, manual_note = $3, rate_scheme_id = CASE WHEN $2::numeric IS NOT NULL THEN NULL ELSE rate_scheme_id END, updated_at = now() WHERE id = $1', [r.id, b.amount, b.note ?? null]);
+      await audit(db, req.user!.id, 'slip_reading', r.id, 'set_manual_amount', undefined, { amount: b.amount }, b.note ?? undefined);
+    }
+    return { updated: rows.length, amount: b.amount };
   });
 
   // --- Excel -----------------------------------------------------------------------------------

@@ -24,6 +24,10 @@ export function DeptInvoice({ batch }: { batch: any }) {
   const [schemeId, setSchemeId] = useState('');
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
   const [sel, setSel] = useState<Set<string>>(new Set());
+  const [taxMode, setTaxMode] = useState<'contract' | 'non_taxable' | 'custom'>('contract');
+  const [taxRate, setTaxRate] = useState('');
+  const [taxIncl, setTaxIncl] = useState(false);
+  const [editing, setEditing] = useState<Set<string>>(new Set());
   const [made, setMade] = useState<{ label: string; billId?: string; error?: string }[]>([]);
   const contracts = (allContracts.data ?? []).filter((k) => k.client_id === clientId && k.status !== 'terminated');
 
@@ -42,21 +46,24 @@ export function DeptInvoice({ batch }: { batch: any }) {
     return [...m.values()];
   }, [batch.pages, allContracts.data]);
 
-  const params = contractId ? { contractId, periodStart: `${month}-01`, periodEnd: monthEnd(month), schemeId: schemeId || undefined } : null;
+  /** Tax on amounts entered by hand (no rate card). Cards that carry their own tax setting use it. */
+  const manualTax = useMemo(() => (taxMode === 'contract' ? null : taxMode === 'non_taxable' ? { mode: 'non_taxable' as const } : { mode: 'custom' as const, rate: taxRate, included: taxIncl }), [taxMode, taxRate, taxIncl]);
+  const taxReady = taxMode !== 'custom' || /^\d+(\.\d+)?$/.test(taxRate);
+  const params = contractId ? { contractId, periodStart: `${month}-01`, periodEnd: monthEnd(month), schemeId: schemeId || undefined, manualTax: manualTax && taxReady ? JSON.stringify(manualTax) : undefined } : null;
   const list = useQuery({ queryKey: ['inv-duties', params], enabled: !!params, queryFn: () => api.get<any>(`/invoice-builder/duties${qs(params!)}`) });
   const cards = useQuery({ queryKey: ['scan-rate-cards', contractId], enabled: !!contractId, queryFn: () => api.get<any[]>(`/scan/rate-cards?contractIds=${contractId}`) });
   const duties: any[] = list.data?.duties ?? [];
   const ids = [...sel].sort();
   const summary = useQuery({
-    queryKey: ['inv-summary', contractId, month, ids], enabled: !!contractId && ids.length > 0,
-    queryFn: () => api.post<any>('/invoice-builder/summary', { contractId, periodStart: `${month}-01`, periodEnd: monthEnd(month), dutyIds: ids }),
+    queryKey: ['inv-summary', contractId, month, ids, manualTax], enabled: !!contractId && ids.length > 0 && taxReady,
+    queryFn: () => api.post<any>('/invoice-builder/summary', { contractId, periodStart: `${month}-01`, periodEnd: monthEnd(month), dutyIds: ids, manualTax: manualTax && taxReady ? manualTax : null }),
   });
   useEffect(() => { setSel(new Set()); }, [contractId, month, schemeId]);
 
   const pick = (g: { contractId: string; clientId: string; month: string }) => { setClientId(g.clientId); setContractId(g.contractId); setMonth(g.month); setSchemeId(''); };
   const eligible = duties.filter((x) => x.eligible);
   const generate = async () => {
-    const r = await run(() => api.post<any>('/invoice-builder/generate', { contractId, periodStart: `${month}-01`, periodEnd: monthEnd(month), dutyIds: ids }));
+    const r = await run(() => api.post<any>('/invoice-builder/generate', { contractId, periodStart: `${month}-01`, periodEnd: monthEnd(month), dutyIds: ids, manualTax: manualTax && taxReady ? manualTax : null }));
     if (!r) return;
     const k = allContracts.data?.find((c) => c.id === contractId);
     setMade((m) => [...m, { label: `${k?.client_name ?? 'Department'} — ${k?.reference_no ?? ''} · ${month} · ${r.duties} duties · ₹${inr(r.totals.grandTotal)}`, billId: r.billId }]);
@@ -73,11 +80,15 @@ export function DeptInvoice({ batch }: { batch: any }) {
         const l = await api.get<any>(`/invoice-builder/duties${qs({ contractId: g.contractId, periodStart: `${g.month}-01`, periodEnd: monthEnd(g.month) })}`);
         const okIds = l.duties.filter((x: any) => x.eligible).map((x: any) => x.id);
         if (!okIds.length) { setMade((m) => [...m, { label, error: 'Nothing eligible to bill (already billed or needs an approved rate).' }]); continue; }
-        const r = await api.post<any>('/invoice-builder/generate', { contractId: g.contractId, periodStart: `${g.month}-01`, periodEnd: monthEnd(g.month), dutyIds: okIds });
+        const r = await api.post<any>('/invoice-builder/generate', { contractId: g.contractId, periodStart: `${g.month}-01`, periodEnd: monthEnd(g.month), dutyIds: okIds, manualTax: manualTax && taxReady ? manualTax : null });
         setMade((m) => [...m, { label: `${label} · ${r.duties} duties · ₹${inr(r.totals.grandTotal)}`, billId: r.billId }]);
       } catch (e) { setMade((m) => [...m, { label, error: (e as Error).message }]); }
     }
     void list.refetch();
+  };
+  const setManual = async (id: string, v: string) => {
+    const r = await run(() => api.put(`/invoice-builder/duties/${id}/manual-amount`, { amount: v === '' ? null : v.trim() }), v === '' ? 'Amount cleared' : 'Amount saved');
+    if (r) { setEditing(new Set()); void list.refetch(); void summary.refetch(); }
   };
   const s = summary.data;
 
@@ -95,15 +106,26 @@ export function DeptInvoice({ batch }: { batch: any }) {
       )}
       {made.length > 0 && (
         <div className="alert info">
-          <b>Invoices created</b>
+          <b>Invoices created</b> <span className="small muted">— open an invoice, send it for review and approve it, then use Generate there to get the Excel and PDF.</span>
           <ul style={{ margin: '4px 0 0 16px' }}>{made.map((m, i) => <li key={i}>{m.error ? <span style={{ color: 'var(--err)' }}>{m.label}: {m.error}</span> : <>{m.label} — <Link to={`/billing/${m.billId}`}>open invoice</Link></>}</li>)}</ul>
         </div>
       )}
       <div className="grid g4">
         <Field label="Department"><select value={clientId} onChange={(e) => { setClientId(e.target.value); setContractId(''); setSchemeId(''); }}><option value="">Select…</option>{(clients.data ?? []).filter((c) => c.status === 'active').map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></Field>
         <Field label="Contract"><select value={contractId} onChange={(e) => { setContractId(e.target.value); setSchemeId(''); }} disabled={!clientId}><option value="">Select…</option>{contracts.map((k) => <option key={k.id} value={k.id}>{k.reference_no} — {k.title}</option>)}</select></Field>
-        <Field label="Approved rate card" hint="Blank = every rate card of the contract"><select value={schemeId} onChange={(e) => setSchemeId(e.target.value)} disabled={!contractId}><option value="">All rate cards</option>{[...new Map((cards.data ?? []).map((c) => [c.scheme_id, c])).values()].map((c) => <option key={c.scheme_id} value={c.scheme_id}>{c.name}</option>)}</select></Field>
+        <Field label="Rate card (optional)" hint="Not needed: duties can use their automatic rate or an amount you enter"><select value={schemeId} onChange={(e) => setSchemeId(e.target.value)} disabled={!contractId}><option value="">No rate card selected</option>{[...new Map((cards.data ?? []).map((c) => [c.scheme_id, c])).values()].map((c) => <option key={c.scheme_id} value={c.scheme_id}>{c.name}</option>)}</select></Field>
         <Field label="Billing month"><input type="month" value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+      <div className="panel" style={{ marginTop: 8 }}>
+        <div className="row" style={{ flexWrap: 'wrap' }}>
+          <b>Tax on amounts you enter by hand</b>
+          <select value={taxMode} onChange={(e) => setTaxMode(e.target.value as typeof taxMode)} aria-label="Tax for amounts entered by hand">
+            <option value="contract">Use the contract's approved tax rules</option><option value="non_taxable">Non-taxable (no GST)</option><option value="custom">Taxable at a GST % I enter</option>
+          </select>
+          {taxMode === 'custom' && <><input placeholder="GST %" inputMode="decimal" value={taxRate} onChange={(e) => setTaxRate(e.target.value)} style={{ width: 80 }} /><select value={taxIncl ? 'in' : 'ex'} onChange={(e) => setTaxIncl(e.target.value === 'in')}><option value="ex">GST extra</option><option value="in">GST included</option></select></>}
+          <span className="small muted">Duties that use a rate card follow that card's own Taxable / Non-taxable setting.</span>
+        </div>
+        {!taxReady && <div className="small" style={{ color: 'var(--warn)' }}>Enter the GST % to continue.</div>}
       </div>
       <ErrorBox error={list.error} />
       {!contractId ? <div className="empty">Choose a department and contract (or pick one from the buttons above) to see its saved duties.</div> : list.isLoading ? <div className="muted">Loading…</div> : (
@@ -116,7 +138,7 @@ export function DeptInvoice({ batch }: { batch: any }) {
             </div>
             <div className="scroll" style={{ maxHeight: '55vh' }}>
               <table className="t">
-                <thead><tr><th /><th>Date</th><th>Vehicle</th><th>Category</th><th>Officer</th><th className="num">KM</th><th>Rate card</th><th className="num">Amount (₹)</th><th>State</th></tr></thead>
+                <thead><tr><th /><th>Date</th><th>Vehicle</th><th>Category</th><th>Officer</th><th className="num">KM</th><th>Rate card</th><th className="num">Amount (₹)</th><th>Tax</th><th>State</th></tr></thead>
                 <tbody>
                   {duties.map((x) => (
                     <tr key={x.id} style={{ opacity: x.state === 'billed' ? 0.6 : 1 }}>
@@ -124,11 +146,17 @@ export function DeptInvoice({ batch }: { batch: any }) {
                       <td className="nowrap">{fmtDate(x.dutyDate)}</td><td className="nowrap">{x.vehicleRegNo}</td><td>{x.vehicleCategory ?? ''}</td><td>{x.fieldOfficer ?? ''}</td>
                       <td className="num">{x.startKm && x.endKm ? Number(x.endKm) - Number(x.startKm) : ''}</td>
                       <td>{x.chosenRateCard ? <b title="Chosen on the slip">{x.chosenRateCard}</b> : x.rateCard ?? <span className="muted">—</span>}</td>
-                      <td className="num">{x.amount ? inr(x.amount) : <span className="muted" title={x.message ?? ''}>—</span>}</td>
-                      <td title={x.message ?? ''}><span className={`badge ${STATE[x.state]?.cls ?? ''}`}>{STATE[x.state]?.label ?? x.state}</span>{x.billNo && <div className="small muted">{x.billNo}</div>}{!x.eligible && x.message && <div className="small" style={{ color: 'var(--warn)' }}>{x.message}</div>}{x.eligible === false && x.state === 'unbilled' && schemeId && !x.message && <div className="small muted">Other rate card</div>}</td>
+                      <td className="num nowrap">
+                        {(x.state === 'unbilled' || x.state === 'cancelled') && (!x.amount || x.manualAmount != null || editing.has(x.id))
+                          ? <input defaultValue={x.manualAmount ?? ''} placeholder="enter ₹" inputMode="decimal" aria-label={`Amount for ${x.vehicleRegNo}`} style={{ width: 90, textAlign: 'right', background: x.amount ? undefined : '#fff3cd' }}
+                              onBlur={(e) => { const v = e.target.value.trim(); if (v !== (x.manualAmount ?? '')) void setManual(x.id, v); }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
+                          : x.amount ? <>{inr(x.amount)} {(x.state === 'unbilled' || x.state === 'cancelled') && <button className="btn sm" title="Enter the amount yourself" onClick={() => setEditing((z) => new Set(z).add(x.id))}>✎</button>}</> : <span className="muted" title={x.message ?? ''}>—</span>}
+                      </td>
+                      <td className="small">{x.tax ?? ''}</td>
+                      <td title={x.message ?? ''}><span className={`badge ${STATE[x.state]?.cls ?? ''}`}>{STATE[x.state]?.label ?? x.state}</span>{x.billNo && <div className="small muted">{x.billNo}</div>}{!x.eligible && x.message && <div className="small" style={{ color: 'var(--warn)' }}>{x.message} Enter the amount to bill it.</div>}{x.eligible === false && x.state === 'unbilled' && schemeId && !x.message && <div className="small muted">Other rate card</div>}</td>
                     </tr>
                   ))}
-                  {duties.length === 0 && <tr><td colSpan={9} className="empty">No saved duties for this contract in {month}.</td></tr>}
+                  {duties.length === 0 && <tr><td colSpan={10} className="empty">No saved duties for this contract in {month}.</td></tr>}
                 </tbody>
               </table>
             </div>

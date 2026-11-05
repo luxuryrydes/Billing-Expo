@@ -16,6 +16,8 @@ const VersionSchema = z.object({
   effective_to: isoDate.nullable().optional(),
   vehicle_category_ids: z.array(uuid).default([]),
   duty_type_codes: z.array(z.string()).default([]),
+  /** Cover every duty type. Left out, it is true when no duty type is listed (as before). */
+  all_duty_types: z.boolean().optional(),
   config: z.unknown(),
   clause_ref: optText,
   notes: optText,
@@ -36,6 +38,7 @@ export function lintConfig(raw: unknown, customFieldKeys: string[] = []): { conf
     }
     dutyVars.add(v.name);
   }
+  if (cfg.tax?.taxable && cfg.tax.rate != null && cfg.tax.rate !== '' && !(Number(cfg.tax.rate) >= 0 && Number(cfg.tax.rate) <= 100)) problems.push('tax.rate: the GST rate must be between 0 and 100');
   const codes = new Set<string>();
   for (const c of cfg.components) {
     if (codes.has(c.code)) problems.push(`Duplicate component code ${c.code}`);
@@ -57,7 +60,7 @@ export function lintConfig(raw: unknown, customFieldKeys: string[] = []): { conf
 export async function loadSchemeVersions(db: Db, contractId: string, onlyApproved = true): Promise<SchemeVersion[]> {
   const rows = await db.query<{
     id: string; scheme_id: string; name: string; version_no: number; status: string; effective_from: string; effective_to: string | null;
-    vehicle_category_ids: string[]; duty_type_codes: string[]; config: unknown;
+    vehicle_category_ids: string[]; duty_type_codes: string[]; all_duty_types: boolean; config: unknown;
   }>(
     `SELECT v.*, s.name FROM rate_scheme_versions v JOIN rate_schemes s ON s.id = v.scheme_id
      WHERE s.contract_id = $1 AND ($2::boolean = false OR v.status = 'approved')`,
@@ -65,7 +68,7 @@ export async function loadSchemeVersions(db: Db, contractId: string, onlyApprove
   );
   return rows.map((r) => ({
     id: r.id, schemeId: r.scheme_id, schemeName: r.name, versionNo: r.version_no, status: r.status, effectiveFrom: r.effective_from,
-    effectiveTo: r.effective_to, vehicleCategoryIds: r.vehicle_category_ids ?? [], dutyTypeCodes: r.duty_type_codes ?? [],
+    effectiveTo: r.effective_to, vehicleCategoryIds: r.vehicle_category_ids ?? [], dutyTypeCodes: r.duty_type_codes ?? [], allDutyTypes: r.all_duty_types,
     config: RateConfigSchema.parse(r.config),
   }));
 }
@@ -78,10 +81,11 @@ const setsIntersect = (a: string[], b: string[]) => a.length === 0 || b.length =
  * check, closing the previous version of the same scheme the day before, and refusing overlaps.
  */
 export async function approveVersion(t: Db, id: string, userId: string, note: string | null = null) {
-  const v = await t.one<{ id: string; scheme_id: string; status: string; config: unknown; effective_from: string; effective_to: string | null; vehicle_category_ids: string[]; duty_type_codes: string[]; created_by: string; submitted_by: string; clause_ref: string | null }>(
+  const v = await t.one<{ id: string; scheme_id: string; status: string; config: unknown; effective_from: string; effective_to: string | null; vehicle_category_ids: string[]; duty_type_codes: string[]; all_duty_types: boolean; created_by: string; submitted_by: string; clause_ref: string | null }>(
     'SELECT * FROM rate_scheme_versions WHERE id = $1 FOR UPDATE', [id]);
   if (!v) throw notFound('Rate version');
   if (v.status !== 'pending_approval') throw conflict('Only versions submitted for approval can be approved');
+  if (!(v.duty_type_codes ?? []).length && v.all_duty_types === false) throw badRequest('This rate card has no duty type: choose the duty types it covers, or mark it for all duty types.');
   if ((await getSetting<boolean>(t, 'makerChecker')) && [v.created_by, v.submitted_by].includes(userId)) throw forbidden('Maker-checker is enabled: a different user must approve this rate version.');
   const lint = lintConfig(v.config);
   if (lint.problems.length) throw badRequest('Configuration has problems', lint.problems);
@@ -112,6 +116,23 @@ export async function approveVersion(t: Db, id: string, userId: string, note: st
   return row;
 }
 
+/** Retires draft versions that repeat another version of the same scheme. Nothing is deleted; each one is recorded. */
+export async function retireDuplicateDrafts(db: Db, userId: string): Promise<number> {
+  const dupes = await db.query<{ id: string; scheme_id: string; version_no: number }>(
+    `SELECT d.id, d.scheme_id, d.version_no FROM rate_scheme_versions d
+       WHERE d.status = 'draft' AND EXISTS (
+         SELECT 1 FROM rate_scheme_versions o
+         WHERE o.scheme_id = d.scheme_id AND o.id <> d.id AND o.config = d.config
+           AND o.vehicle_category_ids = d.vehicle_category_ids AND o.duty_type_codes = d.duty_type_codes
+           AND ((o.status IN ('approved', 'pending_approval') AND o.effective_from <= d.effective_from AND (o.effective_to IS NULL OR o.effective_to >= d.effective_from))
+             OR (o.status = 'draft' AND o.version_no < d.version_no AND o.effective_from = d.effective_from)))`);
+  for (const v of dupes) {
+    await db.query(`UPDATE rate_scheme_versions SET status = 'retired' WHERE id = $1 AND status = 'draft'`, [v.id]);
+    await audit(db, userId, 'rate_version', v.id, 'retire_duplicates', { status: 'draft' }, { status: 'retired' }, 'Same rates as another version of this scheme');
+  }
+  return dupes.length;
+}
+
 export async function rateRoutes(app: FastifyInstance) {
   const db = app.db;
 
@@ -121,7 +142,7 @@ export async function rateRoutes(app: FastifyInstance) {
     const q = req.query as { contractId?: string };
     return db.query(
       `SELECT s.*, k.title AS contract_title, k.reference_no, c.name AS client_name,
-              (SELECT json_agg(json_build_object('id', v.id, 'version_no', v.version_no, 'status', v.status, 'effective_from', v.effective_from, 'effective_to', v.effective_to, 'billing_model', v.config->>'billingModel') ORDER BY v.version_no)
+              (SELECT json_agg(json_build_object('id', v.id, 'version_no', v.version_no, 'status', v.status, 'effective_from', v.effective_from, 'effective_to', v.effective_to, 'billing_model', v.config->>'billingModel', 'tax', v.config->'tax', 'duty_type_codes', v.duty_type_codes, 'all_duty_types', v.all_duty_types, 'vehicle_category_ids', v.vehicle_category_ids) ORDER BY v.version_no)
                FROM rate_scheme_versions v WHERE v.scheme_id = s.id) AS versions
        FROM rate_schemes s JOIN contracts k ON k.id = s.contract_id JOIN clients c ON c.id = k.client_id
        WHERE ($1::uuid IS NULL OR s.contract_id = $1) ORDER BY c.name, s.name`,
@@ -156,9 +177,9 @@ export async function rateRoutes(app: FastifyInstance) {
     const row = await db.tx(async (t) => {
       const next = await t.one<{ n: number }>('SELECT COALESCE(max(version_no),0)+1 AS n FROM rate_scheme_versions WHERE scheme_id = $1', [id]);
       return t.one<{ id: string }>(
-        `INSERT INTO rate_scheme_versions(scheme_id, version_no, effective_from, effective_to, vehicle_category_ids, duty_type_codes, config, clause_ref, notes, created_by)
-         VALUES ($1,$2,$3,$4,$5::uuid[],$6::text[],$7,$8,$9,$10) RETURNING *`,
-        [id, next!.n, b.effective_from, b.effective_to ?? null, b.vehicle_category_ids, b.duty_type_codes, lint.config, b.clause_ref, b.notes, req.user!.id],
+        `INSERT INTO rate_scheme_versions(scheme_id, version_no, effective_from, effective_to, vehicle_category_ids, duty_type_codes, config, clause_ref, notes, created_by, all_duty_types)
+         VALUES ($1,$2,$3,$4,$5::uuid[],$6::text[],$7,$8,$9,$10,$11) RETURNING *`,
+        [id, next!.n, b.effective_from, b.effective_to ?? null, b.vehicle_category_ids, b.duty_type_codes, lint.config, b.clause_ref, b.notes, req.user!.id, b.all_duty_types ?? b.duty_type_codes.length === 0],
       );
     });
     await audit(db, req.user!.id, 'rate_version', row!.id, 'create', undefined, b);
@@ -174,9 +195,9 @@ export async function rateRoutes(app: FastifyInstance) {
     const lint = lintConfig(b.config);
     if (!lint.config) throw badRequest('Rate configuration is invalid', lint.problems);
     const row = await db.one(
-      `UPDATE rate_scheme_versions SET effective_from=$2, effective_to=$3, vehicle_category_ids=$4::uuid[], duty_type_codes=$5::text[], config=$6, clause_ref=$7, notes=$8, status='draft'
+      `UPDATE rate_scheme_versions SET effective_from=$2, effective_to=$3, vehicle_category_ids=$4::uuid[], duty_type_codes=$5::text[], config=$6, clause_ref=$7, notes=$8, status='draft', all_duty_types=$9
        WHERE id=$1 RETURNING *`,
-      [id, b.effective_from, b.effective_to ?? null, b.vehicle_category_ids, b.duty_type_codes, lint.config, b.clause_ref, b.notes],
+      [id, b.effective_from, b.effective_to ?? null, b.vehicle_category_ids, b.duty_type_codes, lint.config, b.clause_ref, b.notes, b.all_duty_types ?? b.duty_type_codes.length === 0],
     );
     await audit(db, req.user!.id, 'rate_version', id, 'update', before, row);
     return { ...row, problems: lint.problems };
@@ -184,16 +205,16 @@ export async function rateRoutes(app: FastifyInstance) {
 
   app.post('/rate-versions/:id/clone', { preHandler: perm('rate.write') }, async (req) => {
     const { id } = req.params as { id: string };
-    const src = await db.one<{ scheme_id: string; config: unknown; vehicle_category_ids: string[]; duty_type_codes: string[]; clause_ref: string | null; effective_from: string }>(
+    const src = await db.one<{ scheme_id: string; config: unknown; vehicle_category_ids: string[]; duty_type_codes: string[]; all_duty_types: boolean; clause_ref: string | null; effective_from: string }>(
       'SELECT * FROM rate_scheme_versions WHERE id = $1', [id]);
     if (!src) throw notFound('Rate version');
     const b = parse(z.object({ effective_from: isoDate.optional() }), req.body ?? {});
     const row = await db.tx(async (t) => {
       const next = await t.one<{ n: number }>('SELECT COALESCE(max(version_no),0)+1 AS n FROM rate_scheme_versions WHERE scheme_id = $1', [src.scheme_id]);
       return t.one<{ id: string }>(
-        `INSERT INTO rate_scheme_versions(scheme_id, version_no, effective_from, vehicle_category_ids, duty_type_codes, config, clause_ref, notes, created_by)
-         VALUES ($1,$2,$3,$4::uuid[],$5::text[],$6,$7,$8,$9) RETURNING *`,
-        [src.scheme_id, next!.n, b.effective_from ?? src.effective_from, src.vehicle_category_ids, src.duty_type_codes, src.config, src.clause_ref, `Copied from version ${id}`, req.user!.id],
+        `INSERT INTO rate_scheme_versions(scheme_id, version_no, effective_from, vehicle_category_ids, duty_type_codes, config, clause_ref, notes, created_by, all_duty_types)
+         VALUES ($1,$2,$3,$4::uuid[],$5::text[],$6,$7,$8,$9,$10) RETURNING *`,
+        [src.scheme_id, next!.n, b.effective_from ?? src.effective_from, src.vehicle_category_ids, src.duty_type_codes, src.config, src.clause_ref, `Copied from version ${id}`, req.user!.id, src.all_duty_types],
       );
     });
     await audit(db, req.user!.id, 'rate_version', row!.id, 'clone', undefined, { from: id });
@@ -202,9 +223,10 @@ export async function rateRoutes(app: FastifyInstance) {
 
   app.post('/rate-versions/:id/submit', { preHandler: perm('rate.write') }, async (req) => {
     const { id } = req.params as { id: string };
-    const v = await db.one<{ status: string; config: unknown }>('SELECT * FROM rate_scheme_versions WHERE id = $1', [id]);
+    const v = await db.one<{ status: string; config: unknown; duty_type_codes: string[]; all_duty_types: boolean }>('SELECT * FROM rate_scheme_versions WHERE id = $1', [id]);
     if (!v) throw notFound('Rate version');
     if (!['draft', 'rejected'].includes(v.status)) throw conflict(`Version is ${v.status}`);
+    if (!(v.duty_type_codes ?? []).length && v.all_duty_types === false) throw badRequest('Choose the duty types this rate card covers, or mark it for all duty types, before submitting.');
     const lint = lintConfig(v.config);
     if (lint.problems.length) throw badRequest('Fix the configuration problems before submitting', lint.problems);
     const row = await db.one(`UPDATE rate_scheme_versions SET status='pending_approval', submitted_by=$2 WHERE id=$1 RETURNING *`, [id, req.user!.id]);
@@ -223,21 +245,7 @@ export async function rateRoutes(app: FastifyInstance) {
    * Retires draft versions that repeat another version of the same scheme (same rates, vehicle categories, duty types) which is already
    * approved, waiting for approval, or an earlier draft. Nothing is deleted and nothing approved is touched; each one is recorded.
    */
-  app.post('/rate-versions/cleanup-duplicates', { preHandler: perm('rate.approve') }, async (req) => {
-    const dupes = await db.query<{ id: string; scheme_id: string; version_no: number }>(
-      `SELECT d.id, d.scheme_id, d.version_no FROM rate_scheme_versions d
-       WHERE d.status = 'draft' AND EXISTS (
-         SELECT 1 FROM rate_scheme_versions o
-         WHERE o.scheme_id = d.scheme_id AND o.id <> d.id AND o.config = d.config
-           AND o.vehicle_category_ids = d.vehicle_category_ids AND o.duty_type_codes = d.duty_type_codes
-           AND ((o.status IN ('approved', 'pending_approval') AND o.effective_from <= d.effective_from AND (o.effective_to IS NULL OR o.effective_to >= d.effective_from))
-             OR (o.status = 'draft' AND o.version_no < d.version_no AND o.effective_from = d.effective_from)))`);
-    for (const v of dupes) {
-      await db.query(`UPDATE rate_scheme_versions SET status = 'retired' WHERE id = $1 AND status = 'draft'`, [v.id]);
-      await audit(db, req.user!.id, 'rate_version', v.id, 'retire_duplicates', { status: 'draft' }, { status: 'retired' }, 'Same rates as another version of this scheme');
-    }
-    return { retired: dupes.length };
-  });
+  app.post('/rate-versions/cleanup-duplicates', { preHandler: perm('rate.approve') }, async (req) => ({ retired: await retireDuplicateDrafts(db, req.user!.id) }));
 
   /** Approve many pending versions at once. Each one goes through the normal approval checks on its own; the ones that fail are listed, not hidden. */
   app.post('/rate-versions/approve-all', { preHandler: perm('rate.approve') }, async (req) => {
@@ -250,6 +258,55 @@ export async function rateRoutes(app: FastifyInstance) {
     }
     await audit(db, req.user!.id, 'rate_version', approved[0] ?? b.ids[0], 'approve_all', undefined, { approved: approved.length, skipped: skipped.length });
     return { approved: approved.length, skipped };
+  });
+
+  /**
+   * One-time catch-up for existing rate cards: duplicate drafts are retired, then every card that is waiting for approval, or still a draft
+   * and not ended, is approved by the person pressing the button (recorded as theirs). Each version still goes through the normal checks;
+   * the ones that cannot be approved (an overlap with an approved version, a configuration problem, maker-checker) are listed with the reason.
+   * Retired, rejected and ended versions are left alone, and no rate, date or category is changed.
+   */
+  app.post('/rate-versions/approve-existing', { preHandler: perm('rate.approve') }, async (req) => {
+    const b = parse(z.object({ includeDrafts: z.boolean().default(true) }), req.body ?? {});
+    const userId = req.user!.id;
+    const retired = await retireDuplicateDrafts(db, userId);
+    const rows = await db.query<{ id: string; status: string; config: unknown; scheme_name: string; version_no: number }>(
+      `SELECT v.id, v.status, v.config, s.name AS scheme_name, v.version_no FROM rate_scheme_versions v JOIN rate_schemes s ON s.id = v.scheme_id
+       WHERE v.status = ANY($1::text[]) AND (v.effective_to IS NULL OR v.effective_to >= current_date) ORDER BY s.name, v.version_no`,
+      [b.includeDrafts ? ['pending_approval', 'draft'] : ['pending_approval']]);
+    let approved = 0;
+    const skipped: { id: string; name: string; reason: string }[] = [];
+    for (const v of rows) {
+      const name = `${v.scheme_name} v${v.version_no}`;
+      try {
+        if (v.status === 'draft') {
+          const lint = lintConfig(v.config);
+          if (lint.problems.length) { skipped.push({ id: v.id, name, reason: `Configuration problems: ${lint.problems.slice(0, 2).join('; ')}` }); continue; }
+          await db.query(`UPDATE rate_scheme_versions SET status = 'pending_approval', submitted_by = $2 WHERE id = $1 AND status = 'draft'`, [v.id, userId]);
+          await db.query(`INSERT INTO approvals(entity_type, entity_id, action, user_id) VALUES ('rate_version',$1,'submit',$2)`, [v.id, userId]);
+        }
+        await db.tx((t) => approveVersion(t, v.id, userId, 'Approved with the existing rate cards'));
+        approved++;
+      } catch (e) { skipped.push({ id: v.id, name, reason: (e as Error).message }); }
+    }
+    await audit(db, userId, 'rate_version', rows[0]?.id ?? '00000000-0000-0000-0000-000000000000', 'approve_existing', undefined, { approved, skipped: skipped.length, retired });
+    return { approved, retiredDuplicates: retired, skipped };
+  });
+
+  /** Sets the tax treatment of rate cards: taxable (with a GST rate, extra or included, or the contract's rules) or non-taxable. Nothing else on the card changes. */
+  app.post('/rate-versions/tax-config', { preHandler: perm('rate.approve') }, async (req) => {
+    const b = parse(z.object({ items: z.array(z.object({ id: uuid, taxable: z.boolean(), rate: z.string().trim().regex(/^\d+(\.\d+)?$/).refine((x) => Number(x) <= 100, 'The GST rate must be between 0 and 100').nullable().optional(), mode: z.enum(['extra', 'included']).default('extra') })).min(1).max(2000) }), req.body);
+    let changed = 0;
+    for (const it of b.items) {
+      const v = await db.one<{ id: string; config: Record<string, unknown>; status: string }>('SELECT id, config, status FROM rate_scheme_versions WHERE id = $1', [it.id]);
+      if (!v || v.status === 'retired') continue;
+      const tax = it.taxable ? { taxable: true, ...(it.rate ? { rate: it.rate } : {}), mode: it.mode } : { taxable: false, mode: 'extra' };
+      const before = (v.config as { tax?: unknown }).tax ?? null;
+      await db.query('UPDATE rate_scheme_versions SET config = $2::jsonb WHERE id = $1', [it.id, JSON.stringify({ ...v.config, tax })]);
+      await audit(db, req.user!.id, 'rate_version', it.id, 'set_tax_config', { tax: before }, { tax });
+      changed++;
+    }
+    return { changed };
   });
 
   /** Rejects many pending versions at once with one reason (for example the ones that overlap an approved version). Each rejection is recorded. */

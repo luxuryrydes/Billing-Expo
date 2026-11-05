@@ -101,7 +101,7 @@ describe('department-wise slips and invoices', () => {
     const r = (await call('POST', `/scan/batches/${ctx.batch}/apply-rate-card`, { readingIds: ctx.readings.slice(0, 3), schemeId: ctx.sail.cards['Ciaz 80/8'].scheme })).body;
     expect(r.applied).toBe(2);
     expect(r.skipped).toHaveLength(1);
-    expect(r.skipped[0].reason).toMatch(/rate card chosen/i);
+    expect(r.skipped[0].reason).toMatch(/does not fit this slip.*vehicle category/i);
     expect(r.total).toBe('3600.00');
     const calc = (await call('GET', `/scan/batches/${ctx.batch}/calculations`)).body;
     expect(calc[ctx.readings[0]]).toMatchObject({ rateCardChosen: true, rateCardName: 'Ciaz 80/8' });

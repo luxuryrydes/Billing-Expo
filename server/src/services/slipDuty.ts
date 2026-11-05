@@ -13,7 +13,7 @@ import type { ValidationSettings } from '../engine/validate.js';
 import { previewCalculation, saveCalculation } from './slipCalc.js';
 
 export type Values = Record<string, string | null>;
-export interface ReadingRow { id: string; page_id: string; batch_id: string; status: string; fields: Record<string, FieldRead>; edited: Record<string, string | null>; contract_id: string | null; duty_id: string | null; rate_scheme_id?: string | null }
+export interface ReadingRow { id: string; page_id: string; batch_id: string; status: string; fields: Record<string, FieldRead>; edited: Record<string, string | null>; contract_id: string | null; duty_id: string | null; rate_scheme_id?: string | null; manual_amount?: string | null; manual_note?: string | null }
 
 /** What the duty will be made from: a person's edit wins over what the AI read. */
 export function effectiveValues(r: Pick<ReadingRow, 'fields' | 'edited'>): Values {
@@ -162,14 +162,14 @@ export async function saveReadings(db: Db, userId: string, batch: { id: string; 
         const locked = await assertDutyEditable(t, String(existing.id)).then(() => null, (e: Error) => e.message);
         // A slip that was saved before is replaced by exactly what is on screen; otherwise blank cells keep the saved value.
         const { merged, changes } = r.duty_id ? { merged: { ...built.input, id: String(existing.id) } as DutyInputT, changes: diffDuty(existing, built.input) } : mergeDuty(existing, built.input);
-        const cardChanged = String(existing.rate_scheme_id ?? '') !== String(r.rate_scheme_id ?? '');
+        const cardChanged = String(existing.rate_scheme_id ?? '') !== String(r.rate_scheme_id ?? '') || Number(existing.manual_amount ?? -1) !== Number(r.manual_amount ?? -1);
         if (!changes.length && !(cardChanged && !locked)) { results.push({ ...base, action: 'unchanged', dutyId: String(existing.id) }); if (!o.dryRun) await t.query('UPDATE slip_readings SET duty_id = $2, contract_id = $3, updated_at = now() WHERE id = $1', [r.id, existing.id, built.contractId]); continue; }
         if (!changes.length && cardChanged && !locked) {
           // Only the rate card changed: keep the duty, record the new card and its calculation.
           results.push({ ...base, action: 'update', dutyId: String(existing.id), changes: [{ field: 'rate card', from: String(existing.rate_scheme_id ?? 'automatic'), to: String(r.rate_scheme_id ?? 'automatic') }] });
           if (!o.dryRun) {
-            await t.query('UPDATE duties SET rate_scheme_id = $2, updated_at = now() WHERE id = $1', [existing.id, r.rate_scheme_id ?? null]);
-            await saveCalculation(t, String(existing.id), await previewCalculation(t, built.input, r.rate_scheme_id ?? null), userId);
+            await t.query('UPDATE duties SET rate_scheme_id = $2, manual_amount = $3, manual_note = $4, updated_at = now() WHERE id = $1', [existing.id, r.rate_scheme_id ?? null, r.manual_amount ?? null, r.manual_note ?? null]);
+            await saveCalculation(t, String(existing.id), await previewCalculation(t, built.input, r.rate_scheme_id ?? null, r.manual_amount ?? null), userId);
             await audit(t, userId, 'duty', String(existing.id), 'set_rate_card', { rate_scheme_id: existing.rate_scheme_id ?? null }, { rate_scheme_id: r.rate_scheme_id ?? null });
             await t.query('UPDATE slip_readings SET duty_id = $2, contract_id = $3, updated_at = now() WHERE id = $1', [r.id, existing.id, built.contractId]);
           }
@@ -180,8 +180,8 @@ export async function saveReadings(db: Db, userId: string, batch: { id: string; 
         results.push({ ...base, action: 'update', dutyId: String(existing.id), issues, changes });
         if (!o.dryRun) {
           await updateDuty(t, merged, c.k, issues, userId);
-          await t.query('UPDATE duties SET rate_scheme_id = $2 WHERE id = $1', [existing.id, r.rate_scheme_id ?? null]);
-          await saveCalculation(t, String(existing.id), await previewCalculation(t, merged, r.rate_scheme_id ?? null), userId);
+          await t.query('UPDATE duties SET rate_scheme_id = $2, manual_amount = $3, manual_note = $4 WHERE id = $1', [existing.id, r.rate_scheme_id ?? null, r.manual_amount ?? null, r.manual_note ?? null]);
+          await saveCalculation(t, String(existing.id), await previewCalculation(t, merged, r.rate_scheme_id ?? null, r.manual_amount ?? null), userId);
           await audit(t, userId, 'duty', String(existing.id), 'scan_update', undefined, { batch: batch.id, reading: r.id, changes });
           await t.query('UPDATE slip_readings SET duty_id = $2, contract_id = $3, updated_at = now() WHERE id = $1', [r.id, existing.id, built.contractId]);
         }
@@ -192,8 +192,8 @@ export async function saveReadings(db: Db, userId: string, batch: { id: string; 
       const row = await insertDuty(t, built.input, c.k, issues, userId, 'import');
       taken.add(String(row!.id));
       await audit(t, userId, 'duty', String(row!.id), 'scan_import', undefined, { batch: batch.id, reading: r.id });
-      await t.query('UPDATE duties SET rate_scheme_id = $2 WHERE id = $1', [row!.id, r.rate_scheme_id ?? null]);
-      await saveCalculation(t, String(row!.id), await previewCalculation(t, built.input, r.rate_scheme_id ?? null), userId);
+      await t.query('UPDATE duties SET rate_scheme_id = $2, manual_amount = $3, manual_note = $4 WHERE id = $1', [row!.id, r.rate_scheme_id ?? null, r.manual_amount ?? null, r.manual_note ?? null]);
+      await saveCalculation(t, String(row!.id), await previewCalculation(t, built.input, r.rate_scheme_id ?? null, r.manual_amount ?? null), userId);
       await t.query('UPDATE slip_readings SET duty_id = $2, contract_id = $3, updated_at = now() WHERE id = $1', [r.id, row!.id, built.contractId]);
       results.push({ ...base, action: 'add', dutyId: String(row!.id), issues });
     }

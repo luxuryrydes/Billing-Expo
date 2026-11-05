@@ -69,6 +69,12 @@ export const RateConfigSchema = z.object({
   components: z.array(ComponentSchema).min(1),
   amountDp: z.number().int().min(0).max(4).default(2),
   amountRoundMode: z.enum(['half_up', 'half_even', 'up', 'down']).default('half_up'),
+  /**
+   * The tax treatment of this rate card. Missing = not configured: the contract's approved tax rules apply, as before.
+   * taxable false: nothing on this card carries GST. taxable true with a rate: that GST rate is used (extra on top of the charges,
+   * or included in them); taxable true without a rate: the contract's approved tax rules apply.
+   */
+  tax: z.object({ taxable: z.boolean(), rate: decStr.optional(), mode: z.enum(['extra', 'included']).default('extra') }).optional(),
 });
 
 export type RateConfig = z.infer<typeof RateConfigSchema>;
@@ -85,6 +91,8 @@ export interface SchemeVersion {
   effectiveTo: string | null;
   vehicleCategoryIds: string[];
   dutyTypeCodes: string[];
+  /** True when the card was set up to cover every duty type. A card with no duty type and this off covers none. */
+  allDutyTypes?: boolean;
   config: RateConfig;
 }
 
@@ -105,6 +113,8 @@ export interface DutyInput {
   customFields?: Record<string, unknown>;
   /** A rate card (rate scheme) chosen for this duty; only versions of that scheme are considered. */
   schemeId?: string | null;
+  /** An amount entered by hand for this duty. It is used instead of a rate card. */
+  manualAmount?: string | null;
 }
 
 export interface TraceInfo {
@@ -132,6 +142,8 @@ export interface CalcLine {
   unit: string;
   rate: string;
   amount: string; // signed; deductions negative
+  /** The rate version the line came from (absent for amounts entered by hand). */
+  versionId?: string | null;
   taxCategory: 'taxable' | 'non_taxable';
   trace: TraceInfo;
 }
@@ -155,6 +167,8 @@ export interface BillSettings {
   arithmetic?: 'standard' | 'lr_exact';
   /** lr_exact only. add (default): tax is added to the total. show_separate: tax is printed but not added. rcm_note: reverse charge, no tax added. */
   gstPresentation?: 'add' | 'show_separate' | 'rcm_note';
+  /** Tax on amounts entered by hand (no rate card): the contract's approved rules (default), none, or a rate chosen on the invoice. */
+  manualTax?: { mode: 'contract' | 'non_taxable' | 'custom'; rate?: string; included?: boolean };
 }
 
 export interface CalcException {

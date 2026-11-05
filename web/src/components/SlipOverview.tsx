@@ -20,9 +20,11 @@ export interface OverviewProps {
   reload: () => void;
   curId: string | undefined;
   onPick: (pageId: string) => void;
+  /** Go on to the invoice step; a rate card is never required for it. */
+  onContinue: () => void;
 }
 
-export function SlipOverview({ d, calc, dutyType, saveCell, reload, curId, onPick }: OverviewProps) {
+export function SlipOverview({ d, calc, dutyType, saveCell, reload, curId, onPick, onContinue }: OverviewProps) {
   const clients = useClients();
   const toast = useToast();
   const { run, busy } = useAction();
@@ -33,6 +35,8 @@ export function SlipOverview({ d, calc, dutyType, saveCell, reload, curId, onPic
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const [cardId, setCardId] = useState('');
   const [result, setResult] = useState<any>(null);
+  const [manualAll, setManualAll] = useState('');
+  const [editing, setEditing] = useState<Set<string>>(new Set());
 
   const rows = useMemo(() => pages.map((p, i) => {
     const r = p.reading;
@@ -79,6 +83,15 @@ export function SlipOverview({ d, calc, dutyType, saveCell, reload, curId, onPic
     toast(schemeId ? `Rate card applied to ${r.applied} slip(s)${r.skipped.length ? `; ${r.skipped.length} not applicable` : ''}` : 'Rate card cleared (automatic)');
     reload();
   };
+  /** Enter (or clear) the amount by hand for slips: no rate card is needed. */
+  const setManual = async (ids: string[], amount: string | null) => {
+    if (amount !== null && !/^\d+(\.\d{1,2})?$/.test(amount.trim())) { toast('Enter the amount as a number, for example 1800 or 1800.50', true); return; }
+    const r = await run(() => api.post<any>(`/scan/batches/${d.batch.id}/apply-manual`, { readingIds: ids, amount: amount === null ? null : amount.trim() }));
+    if (!r) return;
+    toast(amount === null ? 'Amounts cleared' : `Amount ₹${amount} set for ${r.updated} slip(s)`);
+    setEditing(new Set());
+    reload();
+  };
   const eligible = shown.filter((x) => x.state === 'ready');
 
   return (
@@ -120,14 +133,28 @@ export function SlipOverview({ d, calc, dutyType, saveCell, reload, curId, onPic
           <button className="btn primary" disabled={busy || !sel.size || !cardId} onClick={() => apply([...sel], cardId)}>Apply Rate Card to All Selected Slips</button>
           <button className="btn" disabled={busy || !sel.size} title="Go back to the software choosing the rate by vehicle type, duty type and date" onClick={() => apply([...sel], null)}>Use automatic rate</button>
         </div>
+        <div className="row" style={{ flexWrap: 'wrap', marginTop: 6 }}>
+          <span className="small muted">No rate card? Enter the amount yourself:</span>
+          <input placeholder="₹ amount per slip" inputMode="decimal" value={manualAll} onChange={(e) => setManualAll(e.target.value)} style={{ width: 130 }} aria-label="Amount for all selected slips" />
+          <button className="btn" disabled={busy || !sel.size || !manualAll} onClick={() => void setManual([...sel], manualAll)}>Set amount for selected slips</button>
+          <button className="btn sm" disabled={busy || !sel.size} onClick={() => void setManual([...sel], null)}>Clear entered amounts</button>
+          <span className="spacer" />
+          <button className="btn primary" onClick={onContinue} title="A rate card is optional: slips with an amount, or an automatic rate, can be billed">Continue to Invoice →</button>
+        </div>
         {contractIds.length > 1 && <div className="small muted" style={{ marginTop: 4 }}>The selection covers {contractIds.length} contracts. A card is applied only to slips on its own contract; the others are reported.</div>}
         {result && (
           <div style={{ marginTop: 8 }}>
             <div className={result.skipped.length ? 'alert warn' : 'alert info'}>
-              {result.rateCard ? `${result.applied} slip(s) now use "${result.rateCard}", totalling ₹${inr(result.total)} before tax.` : `${result.applied} slip(s) back to the automatic rate.`}
-              {result.skipped.length > 0 && <> {result.skipped.length} slip(s) were left as they were because the card does not fit them:</>}
               <button className="btn sm" style={{ float: 'right' }} onClick={() => setResult(null)}>Dismiss</button>
-              {result.skipped.length > 0 && <ul className="small" style={{ margin: '4px 0 0 16px' }}>{result.skipped.slice(0, 30).map((s: any) => <li key={s.readingId}>Page {s.page}: {s.reason}</li>)}</ul>}
+              {result.rateCard ? `${result.applied} slip(s) now use "${result.rateCard}", totalling ₹${inr(result.total)} before tax.` : `${result.applied} slip(s) back to the automatic rate.`}
+              {result.skipped.length > 0 && <> <b>For information:</b> {result.skipped.length} slip(s) were left as they were because the card does not fit them. This does not stop you: pick another card, enter the amount by hand, or continue to the invoice.</>}
+              {result.skipped.length > 0 && <ul className="small" style={{ margin: '4px 0 0 16px' }}>{result.skipped.slice(0, 30).map((x: any) => <li key={x.readingId}>Page {x.page}: {x.reason}</li>)}</ul>}
+              {result.skipped.length > 0 && (
+                <div className="row" style={{ marginTop: 6 }}>
+                  <button className="btn sm" onClick={() => setSel(new Set(result.skipped.map((x: any) => x.readingId)))}>Select these slips</button>
+                  <button className="btn sm primary" onClick={onContinue}>Continue to Invoice →</button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -179,7 +206,15 @@ export function SlipOverview({ d, calc, dutyType, saveCell, reload, curId, onPic
                           {uniqueCards.map((c) => <option key={c.scheme_id} value={c.scheme_id}>{c.name}</option>)}
                         </select>
                       </td>
-                      <td className="num">{x.amount ? <b>{inr(x.amount)}</b> : <span className="muted">—</span>}</td>
+                      <td className="num nowrap" onClick={(e) => e.stopPropagation()}>
+                        {x.amount && !editing.has(x.r.id) ? (
+                          <><b>{inr(x.amount)}</b>{x.c?.manual && <span className="small muted" title="Entered by hand"> ✎</span>} <button className="btn sm" title="Enter the amount yourself" onClick={() => setEditing((z) => new Set(z).add(x.r.id))}>✎</button></>
+                        ) : (
+                          <input defaultValue={x.c?.manualAmount ?? ''} placeholder="enter ₹" inputMode="decimal" aria-label={`Amount for page ${x.page}`} style={{ width: 84, textAlign: 'right', background: x.state === 'review' ? '#fff3cd' : undefined }}
+                            onBlur={(e) => { const v = e.target.value.trim(); if (v !== (x.c?.manualAmount ?? '')) void setManual([x.r.id], v === '' ? null : v); else setEditing((z) => { const n = new Set(z); n.delete(x.r.id); return n; }); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
+                        )}
+                      </td>
                       <td title={x.c?.message ?? ''}>{x.state === 'saved' ? <span className="badge ok">Saved</span> : x.state === 'ready' ? <span className="badge ok">Ready</span> : x.state === 'dept' ? <span className="badge warn">Check department</span> : x.state === 'review' ? <span className="badge warn">Needs review</span> : <span className="muted">…</span>}</td>
                     </tr>
                   );

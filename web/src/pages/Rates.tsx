@@ -8,6 +8,7 @@ import { d, inr } from '../format';
 import { useCategories, useClients, useContracts, useDutyTypes } from '../lookups';
 import { blankConfig } from './Contracts';
 import { ImportDialog } from '../components/ImportDialog';
+import { ApproveExistingButton, cardStatus, TaxConfigButton, TaxPanel, taxLabel, taxTone } from '../components/RateCardAdmin';
 
 const MODELS: [string, string][] = [
   ['daily_package', 'Daily package (km + hours)'], ['monthly_package', 'Monthly vehicle hire'], ['monthly_limit', 'Monthly km/hour limit + excess'],
@@ -57,7 +58,9 @@ export function RateSchemesPage() {
       <PageHead title="Rate Schemes" sub="Versioned, effective-dated billing rules per contract, vehicle category and duty type. Only approved versions are used for bills.">
         <select value={clientId} onChange={(e) => { setClientId(e.target.value); setContractId(''); }}><option value="">All departments</option>{clients.data?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
         <select value={contractId} onChange={(e) => setContractId(e.target.value)}><option value="">All contracts</option>{contracts.data?.map((k) => <option key={k.id} value={k.id}>{k.reference_no}</option>)}</select>
-        {can('rate.approve') && pendingIds.length > 0 && <button className="btn ok" onClick={() => { setBulkResult(null); setBulk(true); }}>Approve all pending ({pendingIds.length})</button>}
+        {can('rate.approve') && <ApproveExistingButton onDone={() => q.refetch()} />}
+        {can('rate.approve') && <TaxConfigButton schemes={q.data ?? []} onDone={() => q.refetch()} />}
+        {can('rate.approve') && pendingIds.length > 0 && <button className="btn" onClick={() => { setBulkResult(null); setBulk(true); }}>Approve all pending ({pendingIds.length})</button>}
         {can('rate.approve') && <button className="btn" title="Retires draft versions that repeat the same rates as another version of the scheme. Nothing is deleted." onClick={async () => { const r = await run(() => api.post('/rate-versions/cleanup-duplicates', {})); if (r) { alert(`${r.retired} duplicate draft version(s) retired.`); q.refetch(); } }}>Clean up duplicate drafts</button>}
         <label className="check"><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} />Show retired</label>
         {can('rate.write') && <button className="btn" onClick={() => (contractId ? setImportFor(contractId) : setPickContract(true))}>Import rate card</button>}
@@ -67,14 +70,15 @@ export function RateSchemesPage() {
       <div className="panel tight">
         {q.isLoading ? <Loading /> : (
           <table className="t">
-            <thead><tr><th>Department / contract</th><th>Scheme</th><th>Versions</th><th /></tr></thead>
+            <thead><tr><th>Department / contract</th><th>Scheme</th><th>Card status</th><th>Versions</th><th /></tr></thead>
             <tbody>
               {q.data?.map((s) => (
                 <tr key={s.id}><td>{s.client_name}<div className="small muted">{s.reference_no}</div></td><td>{s.name}<div className="small muted">{s.description}</div></td>
-                  <td>{(s.versions ?? []).filter((v: any) => showRetired || v.status !== 'retired').map((v: any) => <div key={v.id}><Link to={`/rates/versions/${v.id}`}>v{v.version_no}</Link> <Status s={shownStatus(v)} /> <span className="small muted">{MODELS.find((m) => m[0] === v.billing_model)?.[1]} · {d(v.effective_from)} – {v.effective_to ? d(v.effective_to) : 'open'}</span></div>)}</td>
+                  <td><span className={`badge ${cardStatus(s.versions ?? []) === 'Approved' ? 'ok' : cardStatus(s.versions ?? []) === 'Pending' ? 'warn' : ''}`}>{cardStatus(s.versions ?? [])}</span></td>
+                  <td>{(s.versions ?? []).filter((v: any) => showRetired || v.status !== 'retired').map((v: any) => <div key={v.id}><Link to={`/rates/versions/${v.id}`}>v{v.version_no}</Link> <Status s={shownStatus(v)} /> <span className="small muted">{MODELS.find((m) => m[0] === v.billing_model)?.[1]} · {d(v.effective_from)} – {v.effective_to ? d(v.effective_to) : 'open'}</span> <span className={`badge ${taxTone(v.tax)}`} title="Tax setting of this rate card">{taxLabel(v.tax)}</span></div>)}</td>
                   <td>{can('rate.write') && <button className="btn sm" onClick={async () => { const r = await run(() => api.post(`/rate-schemes/${s.id}/versions`, { effective_from: new Date().toISOString().slice(0, 10), config: blankConfig() })); if (r) nav(`/rates/versions/${r.id}`); }}>New version</button>}</td></tr>
               ))}
-              {q.data?.length === 0 && <tr><td colSpan={4} className="empty">No rate schemes.</td></tr>}
+              {q.data?.length === 0 && <tr><td colSpan={5} className="empty">No rate schemes.</td></tr>}
             </tbody>
           </table>
         )}
@@ -156,7 +160,7 @@ export function RateVersionPage() {
   const updV = (k: string, val: unknown) => { setV({ ...v, [k]: val }); setDirty(true); };
   const p = cfg.params;
   const save = async () => {
-    const r = await run(() => api.put(`/rate-versions/${id}`, { effective_from: v.effective_from, effective_to: v.effective_to || null, vehicle_category_ids: v.vehicle_category_ids, duty_type_codes: v.duty_type_codes, config: cfg, clause_ref: v.clause_ref, notes: v.notes }), 'Saved');
+    const r = await run(() => api.put(`/rate-versions/${id}`, { effective_from: v.effective_from, effective_to: v.effective_to || null, vehicle_category_ids: v.vehicle_category_ids, duty_type_codes: v.duty_type_codes, all_duty_types: v.duty_type_codes.length === 0 && !!v.all_duty_types, config: cfg, clause_ref: v.clause_ref, notes: v.notes }), 'Saved');
     if (r) { setProblems(r.problems ?? []); q.refetch(); }
   };
   const act = async (path: string, body: unknown = {}, ok = 'Done') => { if (await run(() => api.post(`/rate-versions/${id}/${path}`, body), ok)) q.refetch(); };
@@ -185,8 +189,12 @@ export function RateVersionPage() {
             <Field label="Vehicle categories" hint="None ticked = all categories">
               <div className="row">{cats.data?.map((c) => <label key={c.id} className="check"><input type="checkbox" checked={v.vehicle_category_ids.includes(c.id)} onChange={(e) => updV('vehicle_category_ids', e.target.checked ? [...v.vehicle_category_ids, c.id] : v.vehicle_category_ids.filter((x: string) => x !== c.id))} />{c.name}</label>)}</div>
             </Field>
-            <Field label="Duty types" hint="None ticked = all duty types">
-              <div className="row">{types.data?.map((t) => <label key={t.code} className="check"><input type="checkbox" checked={v.duty_type_codes.includes(t.code)} onChange={(e) => updV('duty_type_codes', e.target.checked ? [...v.duty_type_codes, t.code] : v.duty_type_codes.filter((x: string) => x !== t.code))} />{t.name}</label>)}</div>
+            <Field label="Duty types" hint="Choose the duty types this card covers, or all of them. A card with neither cannot be approved.">
+              <div className="row">
+                <label className="check"><input type="checkbox" checked={!!v.all_duty_types && v.duty_type_codes.length === 0} onChange={(e) => setV({ ...v, all_duty_types: e.target.checked, duty_type_codes: e.target.checked ? [] : v.duty_type_codes })} /><b>All duty types</b></label>
+                {types.data?.map((t) => <label key={t.code} className="check"><input type="checkbox" checked={v.duty_type_codes.includes(t.code)} onChange={(e) => { const next = e.target.checked ? [...v.duty_type_codes, t.code] : v.duty_type_codes.filter((x: string) => x !== t.code); setV({ ...v, duty_type_codes: next, all_duty_types: false }); }} />{t.name}</label>)}
+              </div>
+              {v.duty_type_codes.length === 0 && !v.all_duty_types && <span className="small" style={{ color: 'var(--warn)' }}>No duty type chosen yet.</span>}
             </Field>
           </div>
         </div>
@@ -254,6 +262,7 @@ export function RateVersionPage() {
           {editable && <button className="btn sm" onClick={() => upd((c) => c.params.variables.push({ name: '', expr: '' }))}>Add variable</button>}
         </div>
       </fieldset>
+      <TaxPanel cfg={cfg} editable={editable} status={q.data.status} canApprove={can('rate.approve')} versionId={String(id)} upd={upd} reload={() => q.refetch()} />
       <TestCalculator config={cfg} />
       <details className="panel"><summary><b>Available variables</b></summary>
         <div className="grid g2" style={{ marginTop: 8 }}>

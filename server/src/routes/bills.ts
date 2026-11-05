@@ -310,13 +310,16 @@ export async function billRoutes(app: FastifyInstance) {
   });
   // --- Department-wise invoices ------------------------------------------------------------------------------------
   const BuilderBase = z.object({ contractId: uuid, periodStart: isoDate, periodEnd: isoDate });
+  /** Tax on amounts entered by hand: the contract's approved rules (default), none, or a rate typed on the invoice. */
+  const ManualTaxSchema = z.object({ mode: z.enum(['contract', 'non_taxable', 'custom']), rate: z.string().regex(/^\d+(\.\d+)?$/).refine((v) => Number(v) <= 100, 'The GST rate must be between 0 and 100').optional(), included: z.boolean().optional() })
+    .refine((v) => v.mode !== 'custom' || !!v.rate, 'Enter the GST rate for a custom tax');
 
   /** Saved duties of a contract and period, with how each stands for billing and what it would come to. */
   app.get('/invoice-builder/duties', { preHandler: perm('view') }, async (req) => {
-    const q = parse(BuilderBase.extend({ schemeId: uuid.optional() }), req.query);
+    const q = parse(BuilderBase.extend({ schemeId: uuid.optional(), manualTax: z.string().optional() }), req.query);
     const rows = await periodDuties(db, q.contractId, q.periodStart, q.periodEnd);
     const open = rows.filter((r) => r.bill_state === 'unbilled' || r.bill_state === 'cancelled');
-    const { perDuty, summary } = await invoicePreview(db, q.contractId, q.periodStart, q.periodEnd, open);
+    const { perDuty, summary } = await invoicePreview(db, q.contractId, q.periodStart, q.periodEnd, open, q.manualTax ? parse(ManualTaxSchema, JSON.parse(q.manualTax)) : null);
     return {
       duties: rows.map((r) => {
         const p = perDuty.get(r.id);
@@ -324,19 +327,33 @@ export async function billRoutes(app: FastifyInstance) {
         return {
           id: r.id, dutyDate: r.duty_date, vehicleRegNo: r.vehicle_reg_no, vehicleCategory: r.vehicle_category_name ?? null, dutyType: r.duty_type_code ?? null,
           startKm: r.start_km, endKm: r.end_km, fieldOfficer: r.field_officer ?? null, state: r.bill_state, billNo: r.bill_no, billId: r.bill_id,
-          chosenRateCard: r.chosen_rate_card ?? null, rateCard: p?.schemeName ?? null, rateSchemeId: applied, amount: p?.amount ?? null, message: p?.message ?? null,
-          eligible: (r.bill_state === 'unbilled' || r.bill_state === 'cancelled') && !!p?.ok && (!q.schemeId || applied === q.schemeId),
+          chosenRateCard: r.chosen_rate_card ?? null, manualAmount: r.manual_amount ?? null, manualNote: r.manual_note ?? null, tax: p?.tax ?? null, rateCard: p?.schemeName ?? null, rateSchemeId: applied, amount: p?.amount ?? null, message: p?.message ?? null,
+          // A rate card is optional: a duty can be billed with an automatic rate, a chosen card, or an amount entered by hand.
+          eligible: (r.bill_state === 'unbilled' || r.bill_state === 'cancelled') && !!p?.ok && (!q.schemeId || applied === q.schemeId || !!p?.manual),
         };
       }),
       summary,
     };
   });
 
+  /** Enter, correct or clear an amount by hand for a saved duty that is not on a bill yet. No rate card is needed. */
+  app.put('/invoice-builder/duties/:id/manual-amount', { preHandler: perm('duty.write') }, async (req) => {
+    const { id } = req.params as { id: string };
+    const b = parse(z.object({ amount: z.string().trim().regex(/^\d+(\.\d{1,2})?$/, 'Enter the amount as a number, for example 1800 or 1800.50').nullable(), note: z.string().trim().max(300).nullable().optional() }), req.body);
+    const d = await db.one<{ id: string; manual_amount: string | null }>('SELECT id, manual_amount FROM duties WHERE id = $1 AND status <> \'void\'', [id]);
+    if (!d) throw notFound('Duty');
+    const onBill = await db.one(`SELECT b.bill_no FROM bill_duties bd JOIN bills b ON b.id = bd.bill_id WHERE bd.duty_id = $1 AND bd.active AND b.status NOT IN ('cancelled','superseded')`, [id]);
+    if (onBill) throw conflict('This duty is already on a bill. Cancel or revise the bill to change its amount.');
+    await db.query('UPDATE duties SET manual_amount = $2, manual_note = $3, updated_at = now() WHERE id = $1', [id, b.amount, b.note ?? null]);
+    await audit(db, req.user!.id, 'duty', id, 'set_manual_amount', { amount: d.manual_amount }, { amount: b.amount }, b.note ?? undefined);
+    return { ok: true, amount: b.amount };
+  });
+
   /** What the chosen duties would come to, before an invoice is made. */
   app.post('/invoice-builder/summary', { preHandler: perm('view') }, async (req) => {
-    const b = parse(BuilderBase.extend({ dutyIds: z.array(uuid).max(2000) }), req.body);
+    const b = parse(BuilderBase.extend({ dutyIds: z.array(uuid).max(2000), manualTax: ManualTaxSchema.nullable().optional() }), req.body);
     const rows = (await periodDuties(db, b.contractId, b.periodStart, b.periodEnd)).filter((r) => b.dutyIds.includes(r.id) && (r.bill_state === 'unbilled' || r.bill_state === 'cancelled'));
-    return (await invoicePreview(db, b.contractId, b.periodStart, b.periodEnd, rows)).summary;
+    return (await invoicePreview(db, b.contractId, b.periodStart, b.periodEnd, rows, b.manualTax ?? null)).summary;
   });
 
   /**
@@ -345,7 +362,7 @@ export async function billRoutes(app: FastifyInstance) {
    * same duty twice. The invoice then goes through the normal review, approval and export steps.
    */
   app.post('/invoice-builder/generate', { preHandler: perm('bill.prepare') }, async (req) => {
-    const b = parse(BuilderBase.extend({ dutyIds: z.array(uuid).min(1, 'Select at least one duty').max(2000), billDate: isoDate.optional(), templateVersionId: uuid.nullable().optional() }), req.body);
+    const b = parse(BuilderBase.extend({ dutyIds: z.array(uuid).min(1, 'Select at least one duty').max(2000), billDate: isoDate.optional(), templateVersionId: uuid.nullable().optional(), manualTax: ManualTaxSchema.nullable().optional() }), req.body);
     if (b.periodEnd < b.periodStart) throw badRequest('Period end is before period start');
     const userId = req.user!.id;
     const bill = await db.tx(async (t) => {
@@ -359,7 +376,7 @@ export async function billRoutes(app: FastifyInstance) {
       const chosen = new Set(b.dutyIds);
       const excluded = all.filter((r) => !chosen.has(r.id)).map((r) => ({ dutyId: r.id, reason: 'Not selected for this invoice', by: userId, at: new Date().toISOString() }));
       const created = await createBill({ contract_id: b.contractId, period_start: b.periodStart, period_end: b.periodEnd, bill_date: b.billDate, template_version_id: b.templateVersionId ?? null, include_unverified: true, notes: 'Department-wise invoice from selected duties', period_type: 'range' }, userId, { db: t, allowOverlap: true });
-      await t.query('UPDATE bills SET excluded_duties = $2::jsonb WHERE id = $1', [created.id, JSON.stringify(excluded)]);
+      await t.query('UPDATE bills SET excluded_duties = $2::jsonb, manual_tax = $3::jsonb WHERE id = $1', [created.id, JSON.stringify(excluded), b.manualTax ? JSON.stringify(b.manualTax) : null]);
       for (const id of b.dutyIds) await t.query('INSERT INTO bill_duties(bill_id, duty_id, active) VALUES ($1,$2,true)', [created.id, id]);
       await audit(t, userId, 'bill', created.id, 'invoice_from_duties', undefined, { duties: b.dutyIds.length, excluded: excluded.length });
       return created;

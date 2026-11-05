@@ -35,7 +35,7 @@ export interface SnapshotInput {
 interface BillRow {
   id: string; client_id: string; contract_id: string; period_start: string; period_end: string; bill_no: string | null; bill_date: string | null;
   status: string; revision_no: number; revision_of: string | null; template_version_id: string | null; current_snapshot_id: string | null;
-  excluded_duties: { dutyId: string; reason: string }[]; include_unverified: boolean; created_by: string; reviewed_by: string | null;
+  excluded_duties: { dutyId: string; reason: string }[]; manual_tax: { mode: 'contract' | 'non_taxable' | 'custom'; rate?: string; included?: boolean } | null; include_unverified: boolean; created_by: string; reviewed_by: string | null;
 }
 
 export async function getBill(db: Db, id: string): Promise<BillRow> {
@@ -73,6 +73,7 @@ export async function eligibleDuties(db: Db, bill: BillRow) {
 export function toRenderDuty(r: Record<string, unknown>): RenderDuty {
   return {
     schemeId: (r.rate_scheme_id as string) ?? null,
+    manualAmount: (r.manual_amount as string) ?? null,
     id: String(r.id), dutyDate: String(r.duty_date), vehicleRegNo: String(r.vehicle_reg_no), vehicleCategoryId: (r.vehicle_category_id as string) ?? null,
     vehicleCategoryName: (r.vehicle_category_name as string) ?? null, dutyTypeCode: (r.duty_type_code as string) ?? null,
     startKm: (r.start_km as string) ?? null, endKm: (r.end_km as string) ?? null,
@@ -105,6 +106,7 @@ export async function calculate(db: Db, billId: string, userId: string) {
       id: r.id, name: r.name, taxType: r.tax_type, rate: r.rate, effectiveFrom: r.effective_from, effectiveTo: r.effective_to, status: r.status, sourceRef: r.source_ref,
     }));
     const settings: BillSettings = { taxMode: k!.tax_mode as BillSettings['taxMode'], taxLevel: k!.tax_level as BillSettings['taxLevel'], invoiceRounding: k!.invoice_rounding as BillSettings['invoiceRounding'] };
+    if (bill.manual_tax) settings.manualTax = bill.manual_tax;
     if (k!.arithmetic === 'lr_exact') {
       // The LR Taxi Services merged-invoice arithmetic: exact lines and tax, whole-rupee total.
       settings.arithmetic = 'lr_exact';
@@ -161,7 +163,7 @@ export async function calculate(db: Db, billId: string, userId: string) {
     }
     for (const tl of output.taxLines) {
       await t.query(`INSERT INTO bill_tax_lines(bill_id, snapshot_id, tax_rule_id, name, tax_type, rate, taxable_base, amount) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [billId, snapshotId, tl.taxRuleId, tl.name, tl.taxType, tl.rate, tl.taxableBase, tl.amount]);
+        [billId, snapshotId, tl.taxRuleId || null, tl.name, tl.taxType, tl.rate, tl.taxableBase, tl.amount]);
     }
     for (const e of exceptions) {
       const w = e.severity === 'warning' ? prevWaivers.find((p) => p.code === e.code && p.duty_id === e.dutyId && p.message === e.message) : undefined;

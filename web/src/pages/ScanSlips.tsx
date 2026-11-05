@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, errorText } from '../api';
 import { useAuth } from '../auth';
-import { useContracts } from '../lookups';
+import { useContracts, useDutyTypes } from '../lookups';
 import { ErrorBox, Field, Loading, Modal, PageHead, Status, Tabs, useAction, useToast } from '../components/ui';
 import { inr } from '../format';
 import { SlipOverview } from '../components/SlipOverview';
@@ -11,6 +11,13 @@ import { DeptInvoice } from '../components/DeptInvoice';
 
 type Tab = 'pages' | 'review' | 'save' | 'invoice';
 interface FieldDef { key: string; label: string; kind: string }
+/** The duty type that picks the rate. It is never left blank: a blank one showed as "not set" and no card could match. */
+function DutyTypeSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const types = useDutyTypes();
+  const list = types.data?.length ? types.data : [{ code: 'LOCAL', name: 'Local' }];
+  const current = value || 'LOCAL';
+  return <select value={current} onChange={(e) => onChange(e.target.value)} style={{ minWidth: 150 }}>{!list.some((t) => t.code === current) && <option value={current}>{current}</option>}{list.map((t) => <option key={t.code} value={t.code}>{t.name} ({t.code})</option>)}</select>;
+}
 const img = (fileId: string) => `/api/files/${fileId}/download`;
 const LOW = 0.6;
 
@@ -108,7 +115,7 @@ export function ScanSlipsPage() {
             <BatchHeader d={detail.data} reload={reload} />
             <Tabs<Tab> tabs={[['pages', `1. Pages (${detail.data.pages.filter((p: any) => !p.deleted).length})`], ['review', '2. Read & review'], ['save', '3. Save as duties & bill'], ['invoice', '4. Create invoice']]} value={tab} onChange={setTab} />
             {tab === 'pages' && <PagesTab d={detail.data} status={st} reload={reload} />}
-            {tab === 'review' && <ReviewTab d={detail.data} status={st} reload={reload} dutyType={dutyType} setDutyType={setDutyType} autoRead={autoBatch === batchId && autoBatch !== ''} onAutoStarted={() => setAutoBatch('')} />}
+            {tab === 'review' && <ReviewTab d={detail.data} status={st} reload={reload} dutyType={dutyType} setDutyType={setDutyType} autoRead={autoBatch === batchId && autoBatch !== ''} onAutoStarted={() => setAutoBatch('')} onContinue={() => setTab('invoice')} />}
             {tab === 'invoice' && <DeptInvoice batch={detail.data} />}
             {tab === 'save' && <SaveTab d={detail.data} reload={reload} dutyType={dutyType} setDutyType={setDutyType} />}
           </>
@@ -311,7 +318,7 @@ function PageViewer({ page, index, count, status, busy, run, reload, move }: { p
 }
 
 // --- step 2: read and review ---------------------------------------------------------------------
-function ReviewTab({ d, status, reload, dutyType, setDutyType, autoRead, onAutoStarted }: { d: any; status: any; reload: () => void; dutyType: string; setDutyType: (v: string) => void; autoRead?: boolean; onAutoStarted?: () => void }) {
+function ReviewTab({ d, status, reload, dutyType, setDutyType, autoRead, onAutoStarted, onContinue }: { d: any; status: any; reload: () => void; dutyType: string; setDutyType: (v: string) => void; autoRead?: boolean; onAutoStarted?: () => void; onContinue: () => void }) {
   const fields: FieldDef[] = status?.fields ?? [];
   const pages: any[] = d.pages.filter((p: any) => !p.deleted);
   const contracts = useContracts();
@@ -360,11 +367,11 @@ function ReviewTab({ d, status, reload, dutyType, setDutyType, autoRead, onAutoS
         <a className="btn" href={`/api/scan/batches/${d.batch.id}/export.xlsx`}>Download Excel</a>
         <label className="btn">Upload edited Excel<input type="file" accept=".xlsx" style={{ display: 'none' }} onChange={(e) => { importXlsx(e.target.files?.[0]); e.target.value = ''; }} /></label>
       </div>
-      <div className="row" style={{ marginBottom: 6 }}><Field label="Duty type used to pick the rate" hint="Amounts follow the approved rate for this department, vehicle type, duty type and date"><input value={dutyType} onChange={(e) => setDutyType(e.target.value)} style={{ width: 140 }} /></Field></div>
+      <div className="row" style={{ marginBottom: 6 }}><Field label="Duty type used to pick the rate" hint="Amounts follow the approved rate for this department, vehicle type, duty type and date"><DutyTypeSelect value={dutyType} onChange={setDutyType} /></Field></div>
       <div className="row" style={{ marginBottom: 6 }}><span className="small muted">View:</span><button className={`btn sm ${view === 'overview' ? 'primary' : ''}`} onClick={() => setView('overview')}>By department</button><button className={`btn sm ${view === 'fields' ? 'primary' : ''}`} onClick={() => setView('fields')}>All fields (edit)</button></div>
       <div className="small muted" style={{ marginBottom: 6 }}>Values are shown as the AI read them. <span style={{ background: '#fff3cd', padding: '0 4px' }}>Amber</span> = unsure, check against the slip. Type over any value; <span style={{ background: '#e6f4ea', padding: '0 4px' }}>green</span> = corrected by you. Nothing becomes a duty until you save it in step 3.</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.7fr) minmax(260px, 1fr)', gap: 12 }}>
-        {view === 'overview' ? <SlipOverview d={d} calc={calc.data} dutyType={dutyType} saveCell={saveCell} reload={reload} curId={cur?.id} onPick={setSel} /> : <div className="scroll" style={{ maxHeight: '68vh' }}>
+        {view === 'overview' ? <SlipOverview d={d} calc={calc.data} dutyType={dutyType} saveCell={saveCell} reload={reload} curId={cur?.id} onPick={setSel} onContinue={onContinue} /> : <div className="scroll" style={{ maxHeight: '68vh' }}>
           <table className="t" style={{ minWidth: 2400 }}>
             <thead><tr><th>Pg</th><th>Status</th><th>Amount (₹)</th><th>Contract</th>{fields.map((f) => <th key={f.key}>{f.label}</th>)}</tr></thead>
             <tbody>
@@ -467,7 +474,7 @@ function SaveTab({ d, reload, dutyType, setDutyType }: { d: any; reload: () => v
     <>
       <div className="alert info">Slips become duties only when you save them here. A slip that is already saved is updated, not added again; duties already on an approved bill are left as they are. {readCount} of {pages.length} page(s) have been read.</div>
       <div className="row">
-        <Field label="Duty type for these slips" hint="Used to pick the rate; usually LOCAL"><input value={dutyType} onChange={(e) => setDutyType(e.target.value)} style={{ width: 160 }} /></Field>
+        <Field label="Duty type for these slips" hint="Used to pick the rate; usually LOCAL"><DutyTypeSelect value={dutyType} onChange={setDutyType} /></Field>
         <button className="btn" disabled={busy || !readCount} onClick={check}>Check (nothing saved)</button>
         <button className="btn primary" disabled={busy || !readCount} onClick={save}>Save as duties</button>
       </div>
