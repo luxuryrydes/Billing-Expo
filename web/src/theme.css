@@ -202,3 +202,21 @@ mark { background: color-mix(in srgb, #ffd54a 60%, transparent); color: inherit;
 .dash-attn, .dash-card, .kpi { transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
 .dash-attn:hover, a.dash-card:hover { transform: translateY(-2px); }
 @media (prefers-reduced-motion: reduce) { .dash-attn:hover, a.dash-card:hover { transform: none; } }
+
+/* ===== Buttons and fields polish (2.0) ===== */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; }
+.btn:focus-visible, .tabs button:focus-visible { outline: 3px solid color-mix(in srgb, var(--brand) 35%, transparent); outline-offset: 2px; }
+.btn:disabled, .btn[disabled] { opacity: .5; cursor: not-allowed; box-shadow: none; transform: none; filter: none; }
+.btn.primary:active { transform: translateY(1px) scale(.985); box-shadow: 0 2px 6px rgba(74, 84, 225, .3); }
+.btn.sm { padding: 4px 10px; font-size: 12.5px; }
+input, select, textarea { transition: border-color .15s, box-shadow .15s, background .15s; min-height: 34px; }
+input:hover:not(:focus):not(:disabled), select:hover:not(:focus):not(:disabled), textarea:hover:not(:focus) { border-color: var(--brand); }
+input:focus, select:focus, textarea:focus { box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand) 14%, transparent); outline: none; }
+input:disabled, select:disabled, textarea:disabled { background: var(--panel2); color: var(--muted); cursor: not-allowed; }
+input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--muted) 70%, transparent); }
+input:user-invalid, select:user-invalid, textarea:user-invalid { border-color: var(--err); box-shadow: 0 0 0 4px color-mix(in srgb, var(--err) 12%, transparent); }
+input[type='checkbox'], input[type='radio'] { accent-color: var(--brand); width: 16px; height: 16px; min-height: 0; cursor: pointer; }
+select { cursor: pointer; }
+.tabs button { position: relative; border-bottom-color: transparent !important; }
+.tabs button.on { border-bottom-color: transparent !important; }
+.tab-underline { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; border-radius: 2px; background: linear-gradient(90deg, var(--brand), var(--brand-2)); }

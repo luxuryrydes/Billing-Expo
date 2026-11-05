@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useId, useState, type ReactNode } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { spring } from './motion';
 import { errorText } from '../api';
@@ -53,10 +53,14 @@ export function Modal({ title, onClose, children, wide }: { title: string; onClo
 }
 
 export function Tabs<T extends string>({ tabs, value, onChange }: { tabs: [T, string][]; value: T; onChange: (t: T) => void }) {
+  const uid = useId();
   return (
     <div className="tabs" role="tablist">
       {tabs.map(([k, l]) => (
-        <button key={k} role="tab" aria-selected={value === k} className={value === k ? 'on' : ''} onClick={() => onChange(k)}>{l}</button>
+        <button key={k} role="tab" aria-selected={value === k} className={value === k ? 'on' : ''} onClick={() => onChange(k)}>
+          {l}
+          {value === k && <motion.span layoutId={`tab-underline-${uid}`} className="tab-underline" transition={spring} />}
+        </button>
       ))}
     </div>
   );
