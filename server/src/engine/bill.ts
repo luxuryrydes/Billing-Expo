@@ -312,8 +312,9 @@ export function calculateBill(input: BillCalcInput): BillCalcOutput {
     exceptions.push({
       dutyId: null,
       code: 'TAX_NOT_CONFIGURED',
-      severity: 'error',
-      message: 'Taxable charges exist but no approved tax rule is effective for this contract. Configure and approve the tax treatment (use a 0% rule to confirm an exemption).',
+      // Information, not a stop: a card with its own GST setting never gets here. No GST is added for these charges; set Taxable / Non-taxable on the rate card (or approve a tax rule) if GST applies.
+      severity: 'warning',
+      message: 'No GST was added: these charges come from a rate card with no tax setting and the contract has no approved tax rule. Set Taxable or Non-taxable on the rate card (Rate Schemes → Set tax for rate cards) if GST applies.',
     });
   }
   let gross: Dec = new D(0);

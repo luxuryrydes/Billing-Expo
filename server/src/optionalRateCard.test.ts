@@ -235,3 +235,28 @@ describe('explaining a card with no duty type', () => {
     expect(explainMismatch(d, [{ ...(v as object), allDutyTypes: true } as never])).toEqual([]);
   });
 });
+
+describe('a contract with no tax rules', () => {
+  it('uses the GST set on the rate card, and a card with no setting only warns', async () => {
+    const k2 = (await call('POST', '/contracts', { client_id: ctx.client, title: 'No tax rules', reference_no: 'TDR/02', start_date: '2026-04-01', end_date: '2027-03-31', status: 'active' })).body.id;
+    const mk = async (name: string, cat: string, rate: string, tax?: unknown) => {
+      const cfg: Record<string, unknown> = { billingModel: 'daily_package', params: { includedKm: '80', includedHours: '8', hourRounding: { mode: 'exact', unit: '60' } }, components: [{ code: 'BASE', label: 'Base duty', quantityExpr: '1', rate, unit: 'duty', taxCategory: 'taxable' }] };
+      if (tax) cfg.tax = tax;
+      const s = (await call('POST', '/rate-schemes', { contract_id: k2, name })).body;
+      const v = (await call('POST', `/rate-schemes/${s.id}/versions`, { effective_from: '2026-04-01', vehicle_category_ids: [cat], config: cfg, clause_ref: 'Test' })).body;
+      await call('POST', `/rate-versions/${v.id}/submit`, {});
+      await call('POST', `/rate-versions/${v.id}/approve`, {}, 'approver');
+    };
+    await mk('With GST', ctx.Ciaz, '2000', { taxable: true, rate: '12', mode: 'extra' });
+    await mk('No tax setting', ctx.Innova, '2400');
+    const d = (cat: string) => DutyInputSchema.parse({ ...duty(cat, 'LOCAL', 'DL1CAA7000'), contractId: k2 });
+    const gst = await previewCalculation(db, d(ctx.Ciaz));
+    expect(gst.status).toBe('ok');
+    expect(gst.totals).toMatchObject({ tax: '240.00', total: '2240.00' });
+    expect(gst.message).toBeNull();
+    const none = await previewCalculation(db, d(ctx.Innova));
+    expect(none.status).toBe('ok');   // not an error: the amount is shown and the note says no GST was added
+    expect(none.totals).toMatchObject({ subtotal: '2400.00', tax: '0.00' });
+    expect(none.message).toMatch(/No GST was added/);
+  });
+});
